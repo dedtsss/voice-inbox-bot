@@ -1,0 +1,7 @@
+aiogram>=3.10,<4
+openai>=1.40,<2
+python-dotenv>=1.0,<2
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+requests>=2.32,<3
+aiofiles>=23.2,<25
