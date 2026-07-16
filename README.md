@@ -154,6 +154,7 @@ Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
 - `MOBILE_INBOX_ALLOWED_MIME_TYPES` — allow-list MIME-типов.
 - `MOBILE_INBOX_MAX_REQUEST_BYTES` — общий лимит multipart-запроса.
 - `MOBILE_INBOX_MAX_PAYLOAD_BYTES` — лимит JSON payload.
+- `HTTP_PUBLISHED_PORT` — localhost-порт Docker host для reverse proxy, по умолчанию `8080`.
 
 Smoke-test text-only:
 
