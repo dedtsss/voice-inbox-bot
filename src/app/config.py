@@ -77,7 +77,7 @@ class Settings(BaseSettings):
         alias="MOBILE_INBOX_ALLOWED_MIME_TYPES",
     )
     airtable_upload_base_url: str = Field(
-        default="https://api.airtable.com/v0",
+        default="https://content.airtable.com/v0",
         alias="AIRTABLE_UPLOAD_BASE_URL",
     )
 
