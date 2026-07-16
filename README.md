@@ -11,6 +11,7 @@ MVP-логика:
 5. Всегда пишет запись в Airtable `Voice Inbox`.
 6. Если проект определён уверенно, дополнительно создаёт запись в `Projects OS / Items`.
 7. Возвращает краткую карточку в Telegram.
+8. Принимает записи из Android Dispatcher по HTTPS/HTTP API и сохраняет их в тот же Airtable `Voice Inbox`.
 
 ## Быстрый старт
 
@@ -51,6 +52,7 @@ TELEGRAM_BOT_TOKEN=
 ALLOWED_TELEGRAM_USER_IDS=
 OPENAI_API_KEY=
 AIRTABLE_TOKEN=
+MOBILE_INBOX_TOKEN=
 ```
 
 Airtable-токен должен иметь доступ на запись в базы:
@@ -59,6 +61,12 @@ Airtable-токен должен иметь доступ на запись в б
 - `Projects OS`
 
 Минимальные права: `data.records:read`, `data.records:write`.
+
+`MOBILE_INBOX_TOKEN` должен быть случайным секретом не короче 32 байт. Сгенерировать можно так:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
 
 ### 4. Запустить через Docker
 
@@ -85,10 +93,84 @@ docker compose logs -f
 ## Что важно
 
 - Бот работает через long polling, вебхук и домен на MVP не нужны.
+- HTTP API запускается в том же контейнере и слушает `HTTP_PORT`, по умолчанию `8080`.
+- Для production Android должен использовать HTTPS URL reverse proxy или Cloudflare Tunnel, не прямой HTTP.
 - Доступ ограничивается `ALLOWED_TELEGRAM_USER_IDS`.
 - Фото в MVP обрабатываются по подписи. Анализ изображения добавим позже.
 - Если проект не найден в Airtable, запись остаётся только в `Voice Inbox`.
 - Для `Projects OS / Items` типы приводятся к уже существующим значениям Airtable.
+- Android-записи при `ANDROID_RAW_MODE=true` сохраняются сырыми: OpenAI-транскрипция и структурирование для них не запускаются.
+
+## Android HTTP API
+
+Проверка:
+
+```http
+GET /health
+```
+
+Ответ:
+
+```json
+{"ok": true}
+```
+
+Создание записи:
+
+```http
+POST /api/mobile-inbox/items
+Authorization: Bearer <MOBILE_INBOX_TOKEN>
+Content-Type: multipart/form-data
+```
+
+Parts:
+
+- `payload` — JSON string.
+- `files[]` — 0..N файлов.
+
+Успешный ответ:
+
+```json
+{
+  "ok": true,
+  "remote_id": "rec...",
+  "status": "stored"
+}
+```
+
+Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
+
+- `Название`: первые слова текста или `Android: <тип> <дата-время>`.
+- `Исходная фраза`: текст из `payload`, если он есть.
+- `Тип`: `Text`, `Voice`, `Photo`, `File` или `Mixed`.
+- `Статус обработки`: `New`.
+- `Notes`: источник `Android Dispatcher` и краткая техническая информация.
+- `Attachments`: файлы, загруженные через Airtable Upload Attachment API.
+
+Ограничения задаются env:
+
+- `MOBILE_INBOX_MAX_FILE_BYTES` — максимальный размер одного файла. По умолчанию `5000000`, чтобы соответствовать лимиту direct upload Airtable.
+- `MOBILE_INBOX_MAX_FILES` — максимум файлов в одном запросе.
+- `MOBILE_INBOX_ALLOWED_MIME_TYPES` — allow-list MIME-типов.
+- `MOBILE_INBOX_MAX_REQUEST_BYTES` — общий лимит multipart-запроса.
+- `MOBILE_INBOX_MAX_PAYLOAD_BYTES` — лимит JSON payload.
+
+Smoke-test text-only:
+
+```bash
+curl -sS https://<domain>/api/mobile-inbox/items \
+  -H "Authorization: Bearer $MOBILE_INBOX_TOKEN" \
+  -F 'payload={"type":"text","text":"Проверка Android inbox"}'
+```
+
+Smoke-test с MP3:
+
+```bash
+curl -sS https://<domain>/api/mobile-inbox/items \
+  -H "Authorization: Bearer $MOBILE_INBOX_TOKEN" \
+  -F 'payload={"type":"voice","text":"Тестовая голосовая запись из Android"}' \
+  -F 'files[]=@22-33_mono_16khz_64kbps.mp3;type=audio/mpeg'
+```
 
 ## Следующие доработки
 

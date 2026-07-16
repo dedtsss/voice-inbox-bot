@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import date
 from urllib.parse import quote
@@ -33,6 +34,9 @@ class AirtableClient:
     def _url(self, base_id: str, table_id: str) -> str:
         return f"https://api.airtable.com/v0/{quote(base_id)}/{quote(table_id, safe='')}"
 
+    def _record_url(self, base_id: str, table_id: str, record_id: str) -> str:
+        return f"{self._url(base_id, table_id)}/{quote(record_id, safe='')}"
+
     def _request(
         self,
         method: str,
@@ -61,6 +65,17 @@ class AirtableClient:
             params=[("returnFieldsByFieldId", "true")],
             json_body={"fields": fields, "typecast": True},
         )
+
+    def update_record(self, base_id: str, table_id: str, record_id: str, fields: dict) -> dict:
+        response = self.session.patch(
+            self._record_url(base_id, table_id, record_id),
+            params=[("returnFieldsByFieldId", "true")],
+            json={"fields": fields, "typecast": True},
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise AirtableError(f"Airtable {response.status_code}: {response.text[:500]}")
+        return response.json()
 
     def list_projects(self) -> list[ProjectMatch]:
         projects: list[ProjectMatch] = []
@@ -117,6 +132,81 @@ class AirtableClient:
                 self.settings.voice_inbox_base_id,
                 self.settings.voice_inbox_table_id,
                 minimal,
+            )
+
+    def create_mobile_inbox_record(
+        self,
+        *,
+        title: str,
+        raw_text: str,
+        message_type: str,
+        notes: str,
+    ) -> dict:
+        fields: dict = {}
+        self._set(fields, self.settings.voice_field_title, title)
+        self._set(fields, self.settings.voice_field_raw_text, raw_text)
+        self._set(fields, self.settings.voice_field_type, message_type)
+        self._set(fields, self.settings.voice_field_processing_status, "New")
+        self._set(fields, self.settings.voice_field_notes, notes)
+        try:
+            return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
+        except AirtableError as exc:
+            if not self.settings.voice_field_notes or not _is_unknown_field_error(exc):
+                raise
+            fields.pop(self.settings.voice_field_notes, None)
+            return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
+
+    def upload_voice_attachment(
+        self,
+        *,
+        record_id: str,
+        filename: str,
+        content_type: str,
+        content: bytes,
+    ) -> dict:
+        if not self.settings.voice_field_attachments:
+            raise AirtableError("VOICE_FIELD_ATTACHMENTS is not configured")
+
+        upload_base_url = self.settings.airtable_upload_base_url.rstrip("/")
+        url = (
+            f"{upload_base_url}/"
+            f"{quote(self.settings.voice_inbox_base_id, safe='')}/"
+            f"{quote(record_id, safe='')}/"
+            f"{quote(self.settings.voice_field_attachments, safe='')}/uploadAttachment"
+        )
+        response = self.session.post(
+            url,
+            json={
+                "contentType": content_type,
+                "filename": filename,
+                "file": base64.b64encode(content).decode("ascii"),
+            },
+            timeout=60,
+        )
+        if response.status_code >= 400:
+            raise AirtableError(f"Airtable upload {response.status_code}: {response.text[:500]}")
+        return response.json()
+
+    def mark_mobile_upload_failed(self, record_id: str, notes: str) -> dict:
+        fields: dict = {}
+        self._set(fields, self.settings.voice_field_processing_status, "Needs Review")
+        self._set(fields, self.settings.voice_field_notes, notes)
+        try:
+            return self.update_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                record_id,
+                fields,
+            )
+        except AirtableError as exc:
+            if not self.settings.voice_field_notes or not _is_unknown_field_error(exc):
+                raise
+            fields.pop(self.settings.voice_field_notes, None)
+            return self.update_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                record_id,
+                fields,
             )
 
     def create_project_item(
@@ -188,3 +278,8 @@ def _first_line(text: str, limit: int = 90) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 1].rstrip() + "..."
+
+
+def _is_unknown_field_error(error: AirtableError) -> bool:
+    text = str(error).upper()
+    return "UNKNOWN_FIELD" in text or "UNKNOWN FIELD" in text

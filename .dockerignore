@@ -1,0 +1,10 @@
+.env
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.log
+.DS_Store
+data/incoming/*
+!data/incoming/.gitkeep

@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     voice_field_raw_text: str = Field(alias="VOICE_FIELD_RAW_TEXT")
     voice_field_tags: str = Field(alias="VOICE_FIELD_TAGS")
     voice_field_processing_status: str = Field(alias="VOICE_FIELD_PROCESSING_STATUS")
+    voice_field_attachments: str = Field(default="fld7RljviBo0ybvnP", alias="VOICE_FIELD_ATTACHMENTS")
+    voice_field_notes: str = Field(default="Notes", alias="VOICE_FIELD_NOTES")
 
     projects_base_id: str = Field(alias="PROJECTS_BASE_ID")
     projects_table_id: str = Field(alias="PROJECTS_TABLE_ID")
@@ -57,6 +59,28 @@ class Settings(BaseSettings):
     data_dir: str = Field(default="/app/data", alias="DATA_DIR")
     timezone: str = Field(default="Europe/Moscow", alias="TIMEZONE")
 
+    http_host: str = Field(default="0.0.0.0", alias="HTTP_HOST")
+    http_port: int = Field(default=8080, alias="HTTP_PORT")
+
+    mobile_inbox_token: str = Field(default="", alias="MOBILE_INBOX_TOKEN")
+    android_raw_mode: bool = Field(default=True, alias="ANDROID_RAW_MODE")
+    mobile_inbox_max_file_bytes: int = Field(default=5_000_000, alias="MOBILE_INBOX_MAX_FILE_BYTES")
+    mobile_inbox_max_files: int = Field(default=5, alias="MOBILE_INBOX_MAX_FILES")
+    mobile_inbox_max_request_bytes: int = Field(default=25_000_000, alias="MOBILE_INBOX_MAX_REQUEST_BYTES")
+    mobile_inbox_max_payload_bytes: int = Field(default=65_536, alias="MOBILE_INBOX_MAX_PAYLOAD_BYTES")
+    mobile_inbox_allowed_mime_types: str = Field(
+        default=(
+            "audio/aac,audio/mp3,audio/mp4,audio/mpeg,audio/ogg,audio/opus,audio/wav,audio/webm,"
+            "audio/x-m4a,image/heic,image/heif,image/jpeg,image/png,image/webp,"
+            "application/json,application/pdf,text/plain"
+        ),
+        alias="MOBILE_INBOX_ALLOWED_MIME_TYPES",
+    )
+    airtable_upload_base_url: str = Field(
+        default="https://api.airtable.com/v0",
+        alias="AIRTABLE_UPLOAD_BASE_URL",
+    )
+
     @property
     def allowed_user_ids(self) -> set[int]:
         ids: set[int] = set()
@@ -70,6 +94,14 @@ class Settings(BaseSettings):
     @property
     def data_path(self) -> Path:
         return Path(self.data_dir)
+
+    @property
+    def allowed_mobile_mime_types(self) -> set[str]:
+        return {
+            part.strip().casefold()
+            for part in self.mobile_inbox_allowed_mime_types.replace(";", ",").split(",")
+            if part.strip()
+        }
 
 
 @lru_cache(maxsize=1)

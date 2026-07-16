@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import signal
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -10,9 +12,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.types import Message
+from fastapi import FastAPI
+import uvicorn
 
 from app.airtable import AirtableClient, AirtableError, ProjectMatch
 from app.config import Settings, get_settings
+from app.mobile_api import create_mobile_api
 from app.openai_ops import OpenAIProcessor
 
 logger = logging.getLogger(__name__)
@@ -238,6 +243,35 @@ async def build_dispatcher(settings: Settings, bot: Bot) -> Dispatcher:
     return dispatcher
 
 
+def create_app(settings: Settings | None = None) -> FastAPI:
+    resolved_settings = settings or get_settings()
+    return create_mobile_api(resolved_settings, AirtableClient(resolved_settings))
+
+
+async def run_telegram_polling(settings: Settings, bot: Bot, dispatcher: Dispatcher) -> None:
+    await bot.delete_webhook(drop_pending_updates=False)
+    logger.info("Starting Telegram long polling")
+    await dispatcher.start_polling(bot, handle_signals=False)
+
+
+def install_shutdown_handlers(stop_event: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop_event.set)
+
+
+async def stop_task(task: asyncio.Task, timeout: float) -> None:
+    if task.done():
+        return
+    try:
+        await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.TimeoutError:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = get_settings()
@@ -249,11 +283,38 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     dispatcher = await build_dispatcher(settings, bot)
-    await bot.delete_webhook(drop_pending_updates=False)
-    logger.info("Starting Telegram long polling")
+    app = create_app(settings)
+    config = uvicorn.Config(app, host=settings.http_host, port=settings.http_port, log_level="info")
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+
+    stop_event = asyncio.Event()
+    install_shutdown_handlers(stop_event)
+
+    telegram_task = asyncio.create_task(run_telegram_polling(settings, bot, dispatcher), name="telegram-polling")
+    http_task = asyncio.create_task(server.serve(), name="http-api")
+    shutdown_task = asyncio.create_task(stop_event.wait(), name="shutdown-signal")
+
     try:
-        await dispatcher.start_polling(bot)
+        done, _ = await asyncio.wait(
+            {telegram_task, http_task, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if shutdown_task in done:
+            logger.info("Shutdown signal received")
+        else:
+            for task in done:
+                task.result()
     finally:
+        server.should_exit = True
+        if not telegram_task.done():
+            with contextlib.suppress(RuntimeError):
+                await dispatcher.stop_polling()
+        await stop_task(http_task, timeout=30)
+        await stop_task(telegram_task, timeout=30)
+        shutdown_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await shutdown_task
         await bot.session.close()
 
 

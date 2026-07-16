@@ -17,4 +17,6 @@ RUN pip install -r requirements.txt
 COPY src ./src
 COPY data ./data
 
+EXPOSE 8080
+
 CMD ["python", "-m", "app.main"]
