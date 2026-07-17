@@ -41,7 +41,7 @@ Backup:
 - OAuth client type: `installed`
 - Refresh token: present in `/root/.secrets/google-drive-token.json` (value not printed)
 - Token scopes: `https://www.googleapis.com/auth/drive`
-- Publishing status: not verifiable from the installed-client JSON or authorized-user token. `gcloud` is not installed on the VPS, so the OAuth consent screen publishing status was not available from production.
+- Publishing status: `In production` (from the tracking issue state; not directly re-queried from the installed-client JSON or authorized-user token). `gcloud` is not installed on the VPS, so the OAuth consent screen publishing status was not independently reverified from production.
 
 Operational note: Drive calls succeeded, but each smoke process printed `Could not persist refreshed Google Drive OAuth token` because the token JSON is mounted read-only. Runtime refresh worked in memory.
 
@@ -196,7 +196,7 @@ Untracked/not committed:
 
 ## Limitations
 
-- OAuth consent publishing status was not available from the production OAuth JSON/token and `gcloud` is not installed on the VPS.
+- OAuth consent publishing status was taken from the tracking issue state. It was not independently reverified from the production OAuth JSON/token because `gcloud` is not installed on the VPS.
 - OAuth token refresh succeeds in memory, but refreshed token persistence is blocked by the read-only token mount.
 - Telegram live inbound update was not exercised because the VPS has no authorized Telegram user-session. The polling process, Bot API availability, and production Telegram storage/Airtable processing path were verified.
 - Spool failure was simulated through `DriveStorageError` in an isolated production-settings TestClient process. The running production container config was not modified.
