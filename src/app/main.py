@@ -199,6 +199,13 @@ async def extract_content(
                 files=[renamed_upload(source_file.upload, file_name, mime_type or source_file.upload.mime_type)],
                 temp_paths=[source_file.path, converted],
             )
+        if not settings.google_drive_enabled:
+            text = "\n".join(part for part in [message.caption, f"File: {file_name}"] if part)
+            return IncomingContent(
+                raw_text=text,
+                message_type="File",
+                item_id=telegram_item_id(message),
+            )
         downloaded = await download_telegram_original(
             bot=bot,
             settings=settings,
@@ -219,6 +226,13 @@ async def extract_content(
 
     if message.video:
         file_name = message.video.file_name or f"video_{message.message_id}.mp4"
+        if not settings.google_drive_enabled:
+            text = "\n".join(part for part in [message.caption, f"Video: {file_name}"] if part)
+            return IncomingContent(
+                raw_text=text,
+                message_type="Video",
+                item_id=telegram_item_id(message),
+            )
         downloaded = await download_telegram_original(
             bot=bot,
             settings=settings,
@@ -240,6 +254,12 @@ async def extract_content(
     if message.photo:
         photo = message.photo[-1]
         file_name = f"photo_{message.message_id}.jpg"
+        if not settings.google_drive_enabled:
+            return IncomingContent(
+                raw_text=message.caption or "",
+                message_type="Photo",
+                item_id=telegram_item_id(message),
+            )
         downloaded = await download_telegram_original(
             bot=bot,
             settings=settings,
