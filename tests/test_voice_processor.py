@@ -1,25 +1,32 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from app.airtable import ProjectMatch
+from app.airtable import AirtableClient, ProjectMatch
 from app.config import Settings
 from app.voice_processor import (
     DriveOriginal,
+    GoogleDriveInboxReader,
     MediaExtraction,
+    MediaExtractor,
     PermanentVoiceProcessorError,
     TransientVoiceProcessorError,
     VoiceInboxProcessor,
+    allowed_context_from_metadata,
+    build_airtable_update_fields,
+    classify_media,
+    validate_processor_output,
 )
 
 
-def make_settings(tmp_path: Path) -> Settings:
-    return Settings(
+def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
+    values: dict[str, Any] = dict(
         TELEGRAM_BOT_TOKEN="123:test",
         ALLOWED_TELEGRAM_USER_IDS="1",
         OPENAI_API_KEY="sk-test",
@@ -57,6 +64,8 @@ def make_settings(tmp_path: Path) -> Settings:
         VOICE_PROCESSOR_MAX_RETRIES=2,
         VOICE_PROCESSOR_RETRY_BASE_SECONDS=0,
     )
+    values.update(overrides)
+    return Settings(**values)
 
 
 def valid_ai_result(**overrides: Any) -> dict[str, Any]:
@@ -109,6 +118,112 @@ class FakeDriveReader:
             },
             originals,
         )
+
+
+class FakeExecute:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    def execute(self) -> dict[str, Any]:
+        return self.payload
+
+
+class FakeMediaRequest:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+
+class FakeDriveFilesResource:
+    def __init__(self, contents: dict[str, bytes]) -> None:
+        self.contents = contents
+
+    def list(self, **kwargs: Any) -> FakeExecute:
+        query = str(kwargs.get("q") or "")
+        if "manifest.json" in query:
+            return FakeExecute({"files": [{"id": "manifest", "name": "manifest.json", "size": len(self.contents["manifest"])}]})
+        return FakeExecute({"files": []})
+
+    def get_media(self, *, fileId: str, supportsAllDrives: bool = True) -> FakeMediaRequest:
+        return FakeMediaRequest(self.contents[fileId])
+
+
+class FakeDriveService:
+    def __init__(self, contents: dict[str, bytes]) -> None:
+        self.files_resource = FakeDriveFilesResource(contents)
+
+    def files(self) -> FakeDriveFilesResource:
+        return self.files_resource
+
+
+class FakeMediaIoBaseDownload:
+    def __init__(self, output: Any, request: FakeMediaRequest) -> None:
+        self.output = output
+        self.content = request.content
+        self.offset = 0
+
+    def next_chunk(self) -> tuple[None, bool]:
+        chunk = self.content[self.offset : self.offset + 2]
+        self.output.write(chunk)
+        self.offset += len(chunk)
+        return None, self.offset >= len(self.content)
+
+
+class FakeAirtableResponse:
+    def __init__(self, payload: dict[str, Any], *, status_code: int = 200, text: str = "") -> None:
+        self.payload = payload
+        self.status_code = status_code
+        self.text = text
+
+    def json(self) -> dict[str, Any]:
+        return self.payload
+
+
+class PagingAirtableSession:
+    def __init__(self) -> None:
+        self.requests: list[list[tuple[str, str]]] = []
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        json: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> FakeAirtableResponse:
+        request_params = list(params or [])
+        self.requests.append(request_params)
+        if any(key == "offset" for key, _ in request_params):
+            return FakeAirtableResponse({"records": [{"id": "rec3"}, {"id": "rec4"}]})
+        return FakeAirtableResponse({"records": [{"id": "rec1"}, {"id": "rec2"}], "offset": "next"})
+
+
+class MetadataPatchSession:
+    def __init__(self) -> None:
+        self.patch_payloads: list[dict[str, Any]] = []
+
+    def get(self, url: str, timeout: int = 30) -> FakeAirtableResponse:
+        return FakeAirtableResponse(
+            {
+                "tables": [
+                    {
+                        "id": "tblRMsY9zB5tnVfTR",
+                        "fields": [
+                            {
+                                "id": "fldzeZ9TidyPb1NMa",
+                                "name": "Статус обработки",
+                                "type": "singleSelect",
+                                "options": {"choices": [{"id": "selNew", "name": "New"}]},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+    def patch(self, url: str, *, json: dict[str, Any], timeout: int = 30) -> FakeAirtableResponse:
+        self.patch_payloads.append(json)
+        return FakeAirtableResponse({"id": "fldzeZ9TidyPb1NMa"})
 
 
 @dataclass
@@ -211,8 +326,15 @@ class FakeAirtable:
                     "options": {"choices": [{"name": "Low"}, {"name": "Normal"}, {"name": "High"}]},
                 },
                 {
+                    "id": "fldmOj3oOUEJGsQcx",
+                    "name": "Проект",
+                    "type": "singleSelect",
+                    "options": {"choices": [{"name": "Home"}, {"name": "Work"}]},
+                },
+                {
                     "id": "fldStatus",
                     "name": "Статус обработки",
+                    "type": "singleSelect",
                     "options": {"choices": [{"name": "New"}, {"name": "Processing"}, {"name": "Processed"}, {"name": "Needs Review"}]},
                 },
                 {"id": "fldTags", "name": "Теги", "options": {"choices": [{"name": "finance"}, {"name": "home"}]}},
@@ -231,13 +353,14 @@ class FakeAirtable:
         self.rule_updates.append((record_id, dict(fields)))
         return {"id": record_id, "fields": fields}
 
-    def list_voice_correction_candidates(self, *, page_size: int = 50) -> list[dict]:
+    def list_voice_correction_candidates(self, *, page_size: int = 50, max_records: int | None = None) -> list[dict]:
+        limit = max_records if max_records is not None else page_size
         return [
             record
             for record in self.records.values()
             if record["fields"].get("Обучить на исправлении") is True
             and record["fields"].get("Обучение учтено") is not True
-        ][:page_size]
+        ][:limit]
 
     def create_processing_rule(self, fields: dict[str, Any]) -> dict:
         self.created_rules.append(dict(fields))
@@ -265,8 +388,15 @@ def make_record(record_id: str = "rec1", **fields: Any) -> dict[str, Any]:
     return {"id": record_id, "fields": base}
 
 
-def make_processor(tmp_path: Path, airtable: FakeAirtable, ai: FakeAI, drive: FakeDriveReader) -> VoiceInboxProcessor:
-    settings = make_settings(tmp_path)
+def make_processor(
+    tmp_path: Path,
+    airtable: FakeAirtable,
+    ai: FakeAI,
+    drive: FakeDriveReader,
+    *,
+    settings: Settings | None = None,
+) -> VoiceInboxProcessor:
+    settings = settings or make_settings(tmp_path)
     return VoiceInboxProcessor(
         settings,
         airtable=airtable,  # type: ignore[arg-type]
@@ -300,7 +430,7 @@ def test_modalities_are_processed(tmp_path: Path, files: list[tuple[str, str, by
     fields = airtable.records["rec1"]["fields"]
     assert stats.processed == 1
     assert fields["Статус обработки"] == "Processed"
-    assert fields["Проект"] == ["recHome"]
+    assert fields["Проект"] == "Home"
     assert fields["Исходная фраза"].startswith("Проверить счет")
     snapshot = json.loads(fields["AI результат JSON"])
     for key, value in expected_trace.items():
@@ -340,6 +470,249 @@ def test_video_audio_and_frames_are_included(tmp_path: Path) -> None:
     assert ai.image_calls == [["frame_001.jpg"]]
     snapshot = json.loads(airtable.records["rec1"]["fields"]["AI результат JSON"])
     assert snapshot["media_trace"]["video_frames"] == 1
+
+
+def test_project_field_uses_voice_inbox_single_select_metadata(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, VOICE_FIELD_PROJECT="fldmOj3oOUEJGsQcx")
+    table = {
+        "fields": [
+            {"id": "fldType", "name": "Тип", "options": {"choices": [{"name": "Task"}]}},
+            {"id": "fldPriority", "name": "Приоритет", "options": {"choices": [{"name": "Normal"}]}},
+            {
+                "id": "fldzeZ9TidyPb1NMa",
+                "name": "Статус обработки",
+                "options": {"choices": [{"name": "Processed"}, {"name": "Needs Review"}]},
+            },
+            {"id": "fldTags", "name": "Теги", "options": {"choices": [{"name": "finance"}]}},
+            {
+                "id": "fldmOj3oOUEJGsQcx",
+                "name": "Проект",
+                "type": "singleSelect",
+                "options": {"choices": [{"name": "Home"}, {"name": "Work"}]},
+            },
+        ]
+    }
+    allowed = allowed_context_from_metadata(table, settings, [ProjectMatch("recHome", "Home")])
+    media = MediaExtraction(source_text="Проверить счет", content_blocks=[], trace={})
+
+    validated = validate_processor_output(
+        valid_ai_result(project="Home"),
+        allowed=allowed,
+        settings=settings,
+        media=media,
+        manifest={"item_id": "android-1"},
+        record_id="rec1",
+        attempt=1,
+        lock_id="lock1",
+        used_rule_ids=[],
+    )
+    fields = build_airtable_update_fields(settings, validated)
+
+    assert [project.title for project in allowed.projects] == ["Home", "Work"]
+    assert fields["fldmOj3oOUEJGsQcx"] == "Home"
+    assert fields["fldmOj3oOUEJGsQcx"] != ["recHome"]
+
+
+@pytest.mark.parametrize(
+    ("name", "mime_type", "expected_kind", "expected_trace", "expected_transcripts", "expected_images"),
+    [
+        ("upload.bin", "video/mp4", "video", {"audio_files": 0, "video_files": 1, "video_frames": 1}, ["upload_audio.mp3"], [["frame_001.jpg"]]),
+        ("clip.webm", "video/webm", "video", {"audio_files": 0, "video_files": 1, "video_frames": 1}, ["clip_audio.mp3"], [["frame_001.jpg"]]),
+        ("voice.mp4", "audio/mp4", "audio", {"audio_files": 1, "video_files": 0, "video_frames": 0}, ["voice.mp4"], []),
+        ("clip.mp4", "video/mp4", "video", {"audio_files": 0, "video_files": 1, "video_frames": 1}, ["clip_audio.mp3"], [["frame_001.jpg"]]),
+    ],
+)
+def test_media_extractor_classifies_mime_before_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mime_type: str,
+    expected_kind: str,
+    expected_trace: dict[str, int],
+    expected_transcripts: list[str],
+    expected_images: list[list[str]],
+) -> None:
+    async def fake_extract_video_audio(video_path: Path, audio_path: Path) -> None:
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"mp3")
+
+    async def fake_extract_video_frames(
+        video_path: Path,
+        target_dir: Path,
+        *,
+        max_frames: int,
+        interval_seconds: int,
+        max_edge: int,
+    ) -> list[Path]:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        frame = target_dir / "frame_001.jpg"
+        frame.write_bytes(b"jpeg")
+        return [frame]
+
+    monkeypatch.setattr("app.voice_processor.extract_video_audio", fake_extract_video_audio)
+    monkeypatch.setattr("app.voice_processor.extract_video_frames", fake_extract_video_frames)
+
+    settings = make_settings(tmp_path)
+    ai = FakeAI([])
+    extractor = MediaExtractor(settings, ai)  # type: ignore[arg-type]
+    media_path = tmp_path / name
+    media_path.write_bytes(b"media")
+    original = DriveOriginal(name=name, mime_type=mime_type, path=media_path, size=media_path.stat().st_size, drive_file_id="file-1")
+
+    result = asyncio_run(
+        extractor.extract(
+            record=make_record(),
+            manifest={"text": "caption"},
+            originals=[original],
+            temp_dir=tmp_path / "work",
+        )
+    )
+
+    assert classify_media(original) == expected_kind
+    assert ai.transcripts == expected_transcripts
+    assert ai.image_calls == expected_images
+    for key, value in expected_trace.items():
+        assert result.trace[key] == value
+
+
+def test_airtable_processing_candidates_use_max_records_and_stop_pagination(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = PagingAirtableSession()
+    client.session = session  # type: ignore[assignment]
+
+    records = client.list_voice_records_for_processing(batch_size=2, stale_processing_seconds=900)
+
+    assert [record["id"] for record in records] == ["rec1", "rec2"]
+    assert len(session.requests) == 1
+    assert ("pageSize", "2") in session.requests[0]
+    assert ("maxRecords", "2") in session.requests[0]
+
+
+def test_airtable_correction_candidates_use_max_records_and_stop_pagination(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = PagingAirtableSession()
+    client.session = session  # type: ignore[assignment]
+
+    records = client.list_voice_correction_candidates(max_records=2)
+
+    assert [record["id"] for record in records] == ["rec1", "rec2"]
+    assert len(session.requests) == 1
+    assert ("maxRecords", "2") in session.requests[0]
+
+
+def test_ensure_voice_processor_schema_adds_processing_choice(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = MetadataPatchSession()
+    client.session = session  # type: ignore[assignment]
+
+    added = client.ensure_select_field_choices(
+        settings.voice_inbox_base_id,
+        settings.voice_inbox_table_id,
+        settings.voice_field_processing_status,
+        ["Processing"],
+    )
+
+    assert added == ["Processing"]
+    assert session.patch_payloads[0]["options"]["choices"][-1] == {"name": "Processing"}
+
+
+def test_run_once_honors_batch_size_when_more_records_exist(tmp_path: Path) -> None:
+    records = [make_record(f"rec{index}") for index in range(1, 5)]
+    airtable = FakeAirtable(records)
+    ai = FakeAI([valid_ai_result() for _ in records])
+    settings = make_settings(tmp_path, VOICE_PROCESSOR_BATCH_SIZE=2)
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader(), settings=settings)
+
+    stats = asyncio_run(processor.run_once())
+
+    assert stats.processed == 2
+    assert [record_id for record_id, fields in airtable.updates if fields.get("Статус обработки") == "Processed"] == [
+        "rec1",
+        "rec2",
+    ]
+    assert airtable.records["rec3"]["fields"]["Статус обработки"] == "New"
+
+
+def test_correction_learning_honors_batch_size(tmp_path: Path) -> None:
+    snapshot = json.dumps({"validated": valid_ai_result(project="Home", type="Task")}, ensure_ascii=False)
+    records = [
+        make_record(
+            f"rec{index}",
+            **{
+                "Статус обработки": "Processed",
+                "AI результат JSON": snapshot,
+                "Обучить на исправлении": True,
+                "Обучение учтено": False,
+                "Проект": "Work",
+            },
+        )
+        for index in range(1, 5)
+    ]
+    airtable = FakeAirtable(records)
+    settings = make_settings(tmp_path, VOICE_PROCESSOR_BATCH_SIZE=2)
+    processor = make_processor(tmp_path, airtable, FakeAI([]), FakeDriveReader(), settings=settings)
+
+    learned = asyncio_run(processor.apply_pending_corrections())
+
+    assert learned == 2
+    assert len(airtable.created_rules) == 2
+    assert airtable.records["rec3"]["fields"]["Обучение учтено"] is False
+
+
+def test_drive_reader_rejects_file_over_manifest_size_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("googleapiclient.http.MediaIoBaseDownload", FakeMediaIoBaseDownload)
+    manifest = {
+        "item_id": "android-1",
+        "files": [
+            {"name": "big.mp3", "mime_type": "audio/mpeg", "size": 5, "drive_file_id": "file-1"},
+        ],
+    }
+    service = FakeDriveService({"manifest": json.dumps(manifest).encode("utf-8"), "file-1": b"12345"})
+    settings = make_settings(tmp_path, VOICE_PROCESSOR_MAX_FILE_BYTES=4, VOICE_PROCESSOR_MAX_RECORD_BYTES=20)
+    reader = GoogleDriveInboxReader(settings, service)
+    target_dir = tmp_path / "downloads"
+
+    with pytest.raises(PermanentVoiceProcessorError, match="MAX_FILE_BYTES"):
+        reader.download_record_originals("https://drive.google.com/drive/folders/folder1", target_dir)
+
+    assert not (target_dir / "big.mp3").exists()
+    assert not (target_dir / "manifest.download.json").exists()
+
+
+def test_drive_reader_rejects_sha256_mismatch_and_removes_temp_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("googleapiclient.http.MediaIoBaseDownload", FakeMediaIoBaseDownload)
+    expected_sha = hashlib.sha256(b"good").hexdigest()
+    manifest = {
+        "item_id": "android-1",
+        "files": [
+            {
+                "name": "note.mp3",
+                "mime_type": "audio/mpeg",
+                "size": 3,
+                "sha256": expected_sha,
+                "drive_file_id": "file-1",
+            },
+        ],
+    }
+    service = FakeDriveService({"manifest": json.dumps(manifest).encode("utf-8"), "file-1": b"bad"})
+    settings = make_settings(tmp_path, VOICE_PROCESSOR_MAX_FILE_BYTES=20, VOICE_PROCESSOR_MAX_RECORD_BYTES=20)
+    reader = GoogleDriveInboxReader(settings, service)
+    target_dir = tmp_path / "downloads"
+
+    with pytest.raises(PermanentVoiceProcessorError, match="sha256 mismatch"):
+        reader.download_record_originals("https://drive.google.com/drive/folders/folder1", target_dir)
+
+    assert not (target_dir / "note.mp3").exists()
+    assert not (target_dir / "manifest.download.json").exists()
 
 
 def test_unknown_project_is_rejected(tmp_path: Path) -> None:
@@ -430,7 +803,7 @@ def test_explicit_correction_creates_learning_rule(tmp_path: Path) -> None:
             "AI результат JSON": snapshot,
             "Обучить на исправлении": True,
             "Обучение учтено": False,
-            "Проект": ["recWork"],
+            "Проект": "Work",
             "Комментарий к исправлению": "Всегда относить это к Work",
         },
     )
@@ -472,7 +845,7 @@ def test_active_rule_affects_later_classification(tmp_path: Path) -> None:
 
     asyncio_run(processor.run_once())
 
-    assert airtable.records["rec1"]["fields"]["Проект"] == ["recWork"]
+    assert airtable.records["rec1"]["fields"]["Проект"] == "Work"
     assert ai.structure_calls[0]["rules"][0]["id"] == "rule1"
     assert airtable.rule_updates[0][0] == "rule1"
 

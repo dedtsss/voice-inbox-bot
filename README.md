@@ -100,6 +100,7 @@ docker compose logs -f
 - Telegram-фото в текущем pipeline по-прежнему обрабатываются по подписи, чтобы не менять работающий Telegram ingest.
 - Android raw-записи могут обрабатываться отдельным Drive-based processor, но он выключен по умолчанию.
 - Если проект не найден в Airtable, запись остаётся только в `Voice Inbox`.
+- `Voice Inbox / Проект` — `singleSelect`: код пишет туда только имя существующего choice, не record ID из `Projects OS`.
 - Для `Projects OS / Items` типы приводятся к уже существующим значениям Airtable.
 - Android-записи при `ANDROID_RAW_MODE=true` сохраняются сырыми: OpenAI-транскрипция и структурирование для них не запускаются.
 
@@ -173,7 +174,7 @@ Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
 
 Внутри сохраняются:
 
-- `manifest.json` с `item_id`, source, type, text и Drive file IDs;
+- `manifest.json` с `item_id`, source, type, text, Drive file IDs, size и SHA-256 для оригиналов;
 - оригинальные файлы без перекодирования;
 - Telegram audio дополнительно конвертируется во временный MP3 только для текущей OpenAI-транскрипции, но в Drive кладётся оригинал.
 
@@ -190,7 +191,7 @@ Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
 PYTHONPATH=src python scripts/ensure_airtable_fields.py
 ```
 
-Этот script idempotent: он добавляет metadata поля Drive ingest, feedback поля processor и таблицу `Правила обработки`, если они ещё отсутствуют.
+Этот script idempotent: он добавляет metadata поля Drive ingest, feedback поля processor, choice `Processing` в `Статус обработки` и таблицу `Правила обработки`, если они ещё отсутствуют.
 
 ## Multimodal Voice Processor
 
@@ -198,17 +199,19 @@ Processor живёт в этом же backend и использует сущес
 
 Что делает worker:
 
-1. Берёт небольшую пачку `Voice Inbox / Inbox` со `Статус обработки = New` или stale `Processing`.
-2. Claims запись через `Processing`, lock trace и bounded attempt count в `Ошибка обработки`.
-3. Читает Drive folder URL, `manifest.json` и скачивает оригиналы во временную директорию.
+1. Берёт не больше `VOICE_PROCESSOR_BATCH_SIZE` записей `Voice Inbox / Inbox` со `Статус обработки = New` или stale `Processing`.
+2. Claims запись через заранее существующий choice `Processing`, lock trace и bounded attempt count в `Ошибка обработки`.
+3. Читает Drive folder URL, `manifest.json` и потоково скачивает оригиналы во временную директорию с лимитами размера и проверкой size/SHA-256.
 4. Обрабатывает text/audio/photo/video/mixed: audio transcription, vision analysis для images, video audio + representative frames.
 5. Отправляет итоговый контекст в OpenAI Structured Outputs со strict JSON Schema.
-6. Валидирует project только по существующим Projects OS projects и select values только по текущим Airtable options.
-7. Обновляет ту же Airtable запись, сохраняет `AI результат JSON`, confidence и processor version.
+6. Валидирует project по choices самого поля `Voice Inbox / Проект` и остальные select values по текущим Airtable options.
+7. Обновляет ту же Airtable запись, пишет в `Проект` имя singleSelect choice, сохраняет `AI результат JSON`, confidence и processor version.
 8. При низкой уверенности, неизвестном проекте/type/select conflict ставит `Needs Review`.
 9. Создаёт persistent learning rule только если пользователь явно отметил `Обучить на исправлении`.
 
 Processor не создаёт Projects OS tasks в первой версии. `VOICE_PROCESSOR_CREATE_PROJECT_ITEMS=false` оставлен как future guard; legacy alias `PROCESSOR_CREATE_PROJECT_ITEMS=false` тоже принимается.
+
+V1 processor рассчитан строго на один running worker. Текущий lock trace нужен для recovery и диагностики, но не является атомарной межпроцессной блокировкой Airtable. Не запускайте второй контейнер, `docker compose --scale`, cron-копию или ручной batch параллельно с включённым `VOICE_PROCESSOR_ENABLED=true`.
 
 ### Processor env
 
@@ -228,6 +231,8 @@ VOICE_PROCESSOR_MAX_RETRIES=3
 VOICE_PROCESSOR_RETRY_BASE_SECONDS=1
 VOICE_PROCESSOR_MAX_PROMPT_CHARS=24000
 VOICE_PROCESSOR_MAX_RULES=8
+VOICE_PROCESSOR_MAX_FILE_BYTES=25000000
+VOICE_PROCESSOR_MAX_RECORD_BYTES=50000000
 VOICE_PROCESSOR_MAX_IMAGE_BYTES=4000000
 VOICE_PROCESSOR_IMAGE_MAX_EDGE=1600
 VOICE_PROCESSOR_RULES_TABLE_ID=
@@ -288,12 +293,13 @@ docker compose run --rm voice-inbox-bot \
 ### Safe deploy
 
 1. Merge and deploy with `VOICE_PROCESSOR_ENABLED=false`.
-2. Run `PYTHONPATH=src python scripts/ensure_airtable_fields.py` once with an Airtable token that has schema permissions.
+2. Run `PYTHONPATH=src python scripts/ensure_airtable_fields.py` once with an Airtable token that has schema permissions, so `Processing` is an explicit existing select choice.
 3. Restart the container and verify Telegram plus `/health`.
 4. Create or choose one controlled smoke record with Drive originals.
 5. Run the one-record command with `--record-id ... --ignore-enabled-flag`.
 6. Confirm same Airtable record was updated, `AI результат JSON` is present, temp media is gone, and no duplicate processing happened.
-7. Only after smoke passes, set `VOICE_PROCESSOR_ENABLED=true` with `VOICE_PROCESSOR_BATCH_SIZE=1`, then increase cautiously.
+7. Confirm there is only one processor instance for the deployment.
+8. Only after smoke passes, set `VOICE_PROCESSOR_ENABLED=true` with `VOICE_PROCESSOR_BATCH_SIZE=1`, then increase cautiously.
 
 ### Rollback
 

@@ -1,6 +1,7 @@
 services:
   voice-inbox-bot:
     build: .
+    # V1 voice processor is single-worker only; do not scale this service.
     container_name: voice-inbox-bot
     restart: unless-stopped
     env_file:

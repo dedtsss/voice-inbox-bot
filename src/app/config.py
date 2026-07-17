@@ -137,6 +137,8 @@ class Settings(BaseSettings):
     voice_processor_retry_base_seconds: float = Field(default=1.0, alias="VOICE_PROCESSOR_RETRY_BASE_SECONDS")
     voice_processor_max_prompt_chars: int = Field(default=24000, alias="VOICE_PROCESSOR_MAX_PROMPT_CHARS")
     voice_processor_max_rules: int = Field(default=8, alias="VOICE_PROCESSOR_MAX_RULES")
+    voice_processor_max_file_bytes: int = Field(default=25_000_000, alias="VOICE_PROCESSOR_MAX_FILE_BYTES")
+    voice_processor_max_record_bytes: int = Field(default=50_000_000, alias="VOICE_PROCESSOR_MAX_RECORD_BYTES")
     voice_processor_max_image_bytes: int = Field(default=4_000_000, alias="VOICE_PROCESSOR_MAX_IMAGE_BYTES")
     voice_processor_image_max_edge: int = Field(default=1600, alias="VOICE_PROCESSOR_IMAGE_MAX_EDGE")
     voice_processor_rules_table_id: str = Field(default="", alias="VOICE_PROCESSOR_RULES_TABLE_ID")

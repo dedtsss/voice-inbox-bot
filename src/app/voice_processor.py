@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import mimetypes
@@ -69,7 +70,7 @@ IMAGE_MIME_PREFIX = "image/"
 AUDIO_MIME_PREFIX = "audio/"
 VIDEO_MIME_PREFIX = "video/"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
-AUDIO_EXTENSIONS = {".aac", ".m4a", ".mp3", ".mp4", ".mpeg", ".oga", ".ogg", ".opus", ".wav", ".webm"}
+AUDIO_EXTENSIONS = {".aac", ".m4a", ".mp3", ".mpeg", ".oga", ".ogg", ".opus", ".wav"}
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".webm"}
 TRANSIENT_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 ATTEMPT_RE = re.compile(r"\battempt=(\d+)\b")
@@ -178,13 +179,21 @@ class GoogleDriveInboxReader:
         if not manifest_file:
             raise PermanentVoiceProcessorError("Google Drive manifest.json was not found")
 
-        manifest_bytes = self._download_bytes(manifest_file["id"])
+        manifest_path = target_dir / "manifest.download.json"
         try:
-            manifest = json.loads(manifest_bytes.decode("utf-8"))
+            self._download_to_path(
+                manifest_file["id"],
+                manifest_path,
+                max_bytes=max(1_000_000, self.settings.voice_processor_max_file_bytes),
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PermanentVoiceProcessorError("Google Drive manifest.json is invalid") from exc
+        finally:
+            manifest_path.unlink(missing_ok=True)
 
         originals: list[DriveOriginal] = []
+        downloaded_record_bytes = 0
         for index, item in enumerate(manifest.get("files") or [], start=1):
             if not isinstance(item, dict):
                 continue
@@ -193,15 +202,48 @@ class GoogleDriveInboxReader:
                 continue
             name = safe_original_name(str(item.get("name") or f"file_{index}.bin"))
             mime_type = str(item.get("mime_type") or mimetypes.guess_type(name)[0] or "application/octet-stream")
-            path = target_dir / name
-            content = self._download_bytes(file_id)
-            path.write_bytes(content)
+            manifest_size = manifest_file_size(item)
+            if manifest_size is not None and manifest_size > self.settings.voice_processor_max_file_bytes:
+                raise PermanentVoiceProcessorError(
+                    f"Google Drive file {name} exceeds VOICE_PROCESSOR_MAX_FILE_BYTES "
+                    f"manifest_size={manifest_size} max={self.settings.voice_processor_max_file_bytes}"
+                )
+            if (
+                manifest_size is not None
+                and downloaded_record_bytes + manifest_size > self.settings.voice_processor_max_record_bytes
+            ):
+                raise PermanentVoiceProcessorError(
+                    "Google Drive record exceeds VOICE_PROCESSOR_MAX_RECORD_BYTES "
+                    f"manifest_total={downloaded_record_bytes + manifest_size} "
+                    f"max={self.settings.voice_processor_max_record_bytes}"
+                )
+
+            path = unique_download_path(target_dir, name)
+            max_remaining = max(0, self.settings.voice_processor_max_record_bytes - downloaded_record_bytes)
+            max_file_bytes = min(self.settings.voice_processor_max_file_bytes, max_remaining)
+            try:
+                actual_size = self._download_to_path(file_id, path, max_bytes=max_file_bytes)
+                if manifest_size is not None and actual_size != manifest_size:
+                    raise PermanentVoiceProcessorError(
+                        f"Google Drive file {name} size mismatch manifest_size={manifest_size} actual_size={actual_size}"
+                    )
+                if downloaded_record_bytes + actual_size > self.settings.voice_processor_max_record_bytes:
+                    raise PermanentVoiceProcessorError(
+                        "Google Drive record exceeds VOICE_PROCESSOR_MAX_RECORD_BYTES "
+                        f"actual_total={downloaded_record_bytes + actual_size} "
+                        f"max={self.settings.voice_processor_max_record_bytes}"
+                    )
+                verify_manifest_sha256(item, path, name)
+            except Exception:
+                path.unlink(missing_ok=True)
+                raise
+            downloaded_record_bytes += actual_size
             originals.append(
                 DriveOriginal(
                     name=name,
                     mime_type=mime_type,
                     path=path,
-                    size=len(content),
+                    size=actual_size,
                     drive_file_id=file_id,
                 )
             )
@@ -224,20 +266,26 @@ class GoogleDriveInboxReader:
         files = response.get("files") or []
         return files[0] if files else None
 
-    def _download_bytes(self, file_id: str) -> bytes:
+    def _download_to_path(self, file_id: str, target_path: Path, *, max_bytes: int) -> int:
+        if max_bytes <= 0:
+            raise PermanentVoiceProcessorError("Google Drive record byte limit is exhausted")
         try:
             from googleapiclient.http import MediaIoBaseDownload
-            import io
         except ImportError as exc:
             raise DriveStorageError("Google Drive dependencies are not installed") from exc
 
         request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
-        buffer = io.BytesIO()
-        downloader = MediaIoBaseDownload(buffer, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        return buffer.getvalue()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with target_path.open("wb") as output:
+            downloader = MediaIoBaseDownload(output, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+                if output.tell() > max_bytes:
+                    raise PermanentVoiceProcessorError(
+                        f"Google Drive file exceeds configured byte limit actual_size>{max_bytes}"
+                    )
+        return target_path.stat().st_size
 
 
 class MediaExtractor:
@@ -273,7 +321,8 @@ class MediaExtractor:
             blocks.append("Текст записи:\n" + "\n".join(text_parts))
 
         for original in originals:
-            if is_audio(original):
+            media_type = classify_media(original)
+            if media_type == "audio":
                 trace["audio_files"] += 1
                 transcript = await self.ai.transcribe_audio(original.path)
                 if transcript:
@@ -281,7 +330,7 @@ class MediaExtractor:
                     text_parts.append(transcript)
                 continue
 
-            if is_image(original):
+            if media_type == "image":
                 trace["image_files"] += 1
                 image_path = await self.prepare_image(original.path, temp_dir)
                 description = await self.ai.describe_images([image_path], f"Проанализируй изображение {original.name}.")
@@ -289,7 +338,7 @@ class MediaExtractor:
                     blocks.append(f"Анализ изображения {original.name}:\n{description}")
                 continue
 
-            if is_video(original):
+            if media_type == "video":
                 trace["video_files"] += 1
                 audio_path = temp_dir / f"{original.path.stem}_audio.mp3"
                 await extract_video_audio(original.path, audio_path)
@@ -620,7 +669,10 @@ class VoiceInboxProcessor:
         return result
 
     async def apply_pending_corrections(self) -> int:
-        records = await asyncio.to_thread(self.airtable.list_voice_correction_candidates)
+        records = await asyncio.to_thread(
+            self.airtable.list_voice_correction_candidates,
+            max_records=self.settings.voice_processor_batch_size,
+        )
         learned = 0
         for record in records:
             if await self.apply_correction_learning(record):
@@ -888,20 +940,29 @@ def build_airtable_update_fields(settings: Settings, validated: ValidatedResult)
         settings.voice_field_processor_version: settings.voice_processor_version,
     }
     if validated.project:
-        fields[settings.voice_field_project] = [validated.project.record_id]
+        fields[settings.voice_field_project] = validated.project.title
     else:
         fields[settings.voice_field_project] = None
     return fields
 
 
 def allowed_context_from_metadata(table: dict, settings: Settings, projects: list[ProjectMatch]) -> AllowedContext:
+    project_options = select_options_for_field(table, settings.voice_field_project)
     return AllowedContext(
         type_options=select_options_for_field(table, settings.voice_field_type),
         priority_options=select_options_for_field(table, settings.voice_field_priority),
         status_options=select_options_for_field(table, settings.voice_field_processing_status),
         tag_options=select_options_for_field(table, settings.voice_field_tags),
-        projects=projects,
+        projects=project_matches_from_voice_options(project_options, projects),
     )
+
+
+def project_matches_from_voice_options(options: set[str], projects: list[ProjectMatch]) -> list[ProjectMatch]:
+    projects_os_by_title = {project.title.casefold(): project.record_id for project in projects}
+    return [
+        ProjectMatch(record_id=projects_os_by_title.get(option.casefold(), ""), title=option)
+        for option in sorted(options, key=str.casefold)
+    ]
 
 
 def select_options_for_field(table: dict, configured_field: str) -> set[str]:
@@ -1235,16 +1296,79 @@ def safe_original_name(name: str) -> str:
     return clean or "file.bin"
 
 
+def unique_download_path(target_dir: Path, name: str) -> Path:
+    candidate = target_dir / name
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem or "file"
+    suffix = candidate.suffix
+    for index in range(2, 10_000):
+        next_candidate = target_dir / f"{stem}_{index}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+    raise PermanentVoiceProcessorError(f"Could not allocate unique download path for {name}")
+
+
+def manifest_file_size(item: dict[str, Any]) -> int | None:
+    raw_size = item.get("size")
+    if raw_size in (None, ""):
+        return None
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError) as exc:
+        raise PermanentVoiceProcessorError(f"Google Drive manifest file size is invalid: {raw_size!r}") from exc
+    if size < 0:
+        raise PermanentVoiceProcessorError(f"Google Drive manifest file size is negative: {size}")
+    return size
+
+
+def verify_manifest_sha256(item: dict[str, Any], path: Path, name: str) -> None:
+    expected = str(item.get("sha256") or item.get("hash") or "").strip().casefold()
+    if not expected:
+        return
+    actual = sha256_file(path)
+    if actual.casefold() != expected:
+        raise PermanentVoiceProcessorError(
+            f"Google Drive file {name} sha256 mismatch manifest_sha256={expected} actual_sha256={actual}"
+        )
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def classify_media(original: DriveOriginal) -> str:
+    mime_type = str(original.mime_type or "").split(";", 1)[0].strip().casefold()
+    suffix = original.path.suffix.casefold()
+    if mime_type.startswith(VIDEO_MIME_PREFIX):
+        return "video"
+    if mime_type.startswith(AUDIO_MIME_PREFIX):
+        return "audio"
+    if mime_type.startswith(IMAGE_MIME_PREFIX):
+        return "image"
+    if suffix in VIDEO_EXTENSIONS:
+        return "video"
+    if suffix in AUDIO_EXTENSIONS:
+        return "audio"
+    if suffix in IMAGE_EXTENSIONS:
+        return "image"
+    return "unsupported"
+
+
 def is_audio(original: DriveOriginal) -> bool:
-    return original.mime_type.casefold().startswith(AUDIO_MIME_PREFIX) or original.path.suffix.casefold() in AUDIO_EXTENSIONS
+    return classify_media(original) == "audio"
 
 
 def is_image(original: DriveOriginal) -> bool:
-    return original.mime_type.casefold().startswith(IMAGE_MIME_PREFIX) or original.path.suffix.casefold() in IMAGE_EXTENSIONS
+    return classify_media(original) == "image"
 
 
 def is_video(original: DriveOriginal) -> bool:
-    return original.mime_type.casefold().startswith(VIDEO_MIME_PREFIX) or original.path.suffix.casefold() in VIDEO_EXTENSIONS
+    return classify_media(original) == "video"
 
 
 def image_data_url(path: Path, mime_type: str) -> str:
