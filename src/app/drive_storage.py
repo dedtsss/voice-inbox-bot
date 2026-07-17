@@ -94,13 +94,54 @@ def build_drive_storage(settings: Settings) -> DriveStorage | None:
     return GoogleDriveStorage(settings)
 
 
+def build_google_drive_service(settings: Settings):
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2 import credentials as oauth_credentials
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+    except ImportError as exc:
+        raise DriveStorageError("Google Drive dependencies are not installed") from exc
+
+    credentials_file = Path(settings.google_drive_credentials_file)
+    token_file = Path(settings.google_drive_token_file) if settings.google_drive_token_file else None
+    if not credentials_file.exists():
+        raise DriveStorageError("Google Drive credentials file is missing")
+
+    try:
+        credentials_payload = json.loads(credentials_file.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DriveStorageError("Google Drive credentials file is invalid") from exc
+
+    if credentials_payload.get("type") == "service_account":
+        creds = service_account.Credentials.from_service_account_file(str(credentials_file), scopes=DRIVE_SCOPES)
+    else:
+        if token_file is None or not token_file.exists():
+            raise DriveStorageError("Google Drive OAuth token file is missing")
+        creds = oauth_credentials.Credentials.from_authorized_user_file(str(token_file), DRIVE_SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            save_refreshed_google_drive_token(token_file, creds)
+        if not creds.valid:
+            raise DriveStorageError("Google Drive OAuth credentials are not valid")
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def save_refreshed_google_drive_token(token_file: Path, creds: Any) -> None:
+    try:
+        token_file.write_text(creds.to_json())
+        os.chmod(token_file, 0o600)
+    except OSError:
+        logger.warning("Could not persist refreshed Google Drive OAuth token")
+
+
 class GoogleDriveStorage:
     def __init__(self, settings: Settings) -> None:
         if not settings.google_drive_root_folder_id:
             raise DriveStorageError("GOOGLE_DRIVE_ROOT_FOLDER_ID is not configured")
         self.settings = settings
         self.root_folder_id = settings.google_drive_root_folder_id
-        self.service = self._build_service(settings)
+        self.service = build_google_drive_service(settings)
 
     def store_item(
         self,
@@ -184,45 +225,6 @@ class GoogleDriveStorage:
             files=stored_files,
             manifest=manifest,
         )
-
-    def _build_service(self, settings: Settings):
-        try:
-            from google.auth.transport.requests import Request
-            from google.oauth2 import credentials as oauth_credentials
-            from google.oauth2 import service_account
-            from googleapiclient.discovery import build
-        except ImportError as exc:
-            raise DriveStorageError("Google Drive dependencies are not installed") from exc
-
-        credentials_file = Path(settings.google_drive_credentials_file)
-        token_file = Path(settings.google_drive_token_file) if settings.google_drive_token_file else None
-        if not credentials_file.exists():
-            raise DriveStorageError("Google Drive credentials file is missing")
-
-        try:
-            credentials_payload = json.loads(credentials_file.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            raise DriveStorageError("Google Drive credentials file is invalid") from exc
-
-        if credentials_payload.get("type") == "service_account":
-            creds = service_account.Credentials.from_service_account_file(str(credentials_file), scopes=DRIVE_SCOPES)
-        else:
-            if token_file is None or not token_file.exists():
-                raise DriveStorageError("Google Drive OAuth token file is missing")
-            creds = oauth_credentials.Credentials.from_authorized_user_file(str(token_file), DRIVE_SCOPES)
-            if creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-                self._save_refreshed_token(token_file, creds)
-            if not creds.valid:
-                raise DriveStorageError("Google Drive OAuth credentials are not valid")
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-    def _save_refreshed_token(self, token_file: Path, creds: Any) -> None:
-        try:
-            token_file.write_text(creds.to_json())
-            os.chmod(token_file, 0o600)
-        except OSError:
-            logger.warning("Could not persist refreshed Google Drive OAuth token")
 
     def _find_child(self, parent_id: str, name: str, mime_type: str | None = None) -> dict[str, Any] | None:
         escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
