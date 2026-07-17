@@ -156,6 +156,48 @@ Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
 - `MOBILE_INBOX_MAX_PAYLOAD_BYTES` — лимит JSON payload.
 - `HTTP_PUBLISHED_PORT` — localhost-порт Docker host для reverse proxy, по умолчанию `8080`.
 - `AIRTABLE_UPLOAD_BASE_URL` — host Airtable Upload Attachment API, по умолчанию `https://content.airtable.com/v0`.
+- `GOOGLE_DRIVE_ENABLED` — включает сохранение оригиналов в Google Drive.
+- `GOOGLE_DRIVE_ROOT_FOLDER_ID` — родительская папка Google Drive для входящих подпапок.
+- `GOOGLE_DRIVE_CREDENTIALS_FILE` и `GOOGLE_DRIVE_TOKEN_FILE` — OAuth/service-account файлы внутри контейнера.
+- `GOOGLE_DRIVE_SPOOL_DIR` — локальный защищённый spool на случай временной ошибки Drive.
+
+## Google Drive originals
+
+Когда `GOOGLE_DRIVE_ENABLED=true`, для каждого входящего Android или Telegram элемента создаётся папка:
+
+```text
+<GOOGLE_DRIVE_ROOT_FOLDER_ID>/<YYYY-MM-DD>_<item_id>/
+```
+
+Внутри сохраняются:
+
+- `manifest.json` с `item_id`, source, type, text и Drive file IDs;
+- оригинальные файлы без перекодирования;
+- Telegram audio дополнительно конвертируется во временный MP3 только для текущей OpenAI-транскрипции, но в Drive кладётся оригинал.
+
+Новые поля Airtable `Voice Inbox / Inbox`:
+
+- `External ID` — ключ идемпотентности.
+- `Google Drive` — URL папки входящей записи.
+- `Источник` — `Android` или `Telegram`.
+- `Ошибка обработки` — последняя техническая ошибка.
+
+Если Airtable token имеет schema permissions, поля можно создать так:
+
+```bash
+PYTHONPATH=src python scripts/ensure_airtable_fields.py
+```
+
+Для OAuth 2.0 offline access:
+
+```bash
+PYTHONPATH=src python scripts/google_drive_oauth.py \
+  --client /path/to/google-drive-client.json \
+  --token /path/to/google-drive-token.json \
+  --port 8090
+```
+
+На headless VPS удобнее выполнить команду на локальной машине с браузером, затем безопасно перенести `google-drive-token.json` на VPS. Не вставляйте client secret, refresh token или access token в чат, Git, логи или issue.
 
 Smoke-test text-only:
 

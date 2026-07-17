@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 from urllib.parse import quote
 
 import requests
@@ -36,6 +37,9 @@ class AirtableClient:
 
     def _record_url(self, base_id: str, table_id: str, record_id: str) -> str:
         return f"{self._url(base_id, table_id)}/{quote(record_id, safe='')}"
+
+    def _meta_table_url(self, base_id: str, table_id: str) -> str:
+        return f"https://api.airtable.com/v0/meta/bases/{quote(base_id)}/tables/{quote(table_id, safe='')}"
 
     def _request(
         self,
@@ -76,6 +80,26 @@ class AirtableClient:
         if response.status_code >= 400:
             raise AirtableError(f"Airtable {response.status_code}: {response.text[:500]}")
         return response.json()
+
+    def find_voice_record_by_external_id(self, external_id: str) -> dict | None:
+        if not external_id.strip() or not self.settings.voice_field_external_id_query_name:
+            return None
+        escaped = external_id.replace("\\", "\\\\").replace("'", "\\'")
+        response = self.session.get(
+            self._url(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id),
+            params=[
+                ("pageSize", "1"),
+                ("returnFieldsByFieldId", "true"),
+                ("filterByFormula", f"{{{self.settings.voice_field_external_id_query_name}}} = '{escaped}'"),
+            ],
+            timeout=30,
+        )
+        if response.status_code == 422 and _is_unknown_field_text(response.text):
+            return None
+        if response.status_code >= 400:
+            raise AirtableError(f"Airtable {response.status_code}: {response.text[:500]}")
+        records = response.json().get("records") or []
+        return records[0] if records else None
 
     def list_projects(self) -> list[ProjectMatch]:
         projects: list[ProjectMatch] = []
@@ -122,12 +146,37 @@ class AirtableClient:
         raw_text: str,
         message_type: str,
         project: ProjectMatch | None,
+        *,
+        external_id: str | None = None,
+        google_drive_url: str | None = None,
+        source: str | None = None,
+        processing_error: str | None = None,
     ) -> dict:
-        fields = self._voice_fields(structured, raw_text, message_type, project, include_optional=True)
+        fields = self._voice_fields(
+            structured,
+            raw_text,
+            message_type,
+            project,
+            include_optional=True,
+            external_id=external_id,
+            google_drive_url=google_drive_url,
+            source=source,
+            processing_error=processing_error,
+        )
         try:
             return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
-        except AirtableError:
-            minimal = self._voice_fields(structured, raw_text, message_type, project, include_optional=False)
+        except AirtableError as exc:
+            minimal = self._voice_fields(
+                structured,
+                raw_text,
+                message_type,
+                project,
+                include_optional=not _is_unknown_field_error(exc),
+                external_id=None if _is_unknown_field_error(exc) else external_id,
+                google_drive_url=None if _is_unknown_field_error(exc) else google_drive_url,
+                source=None if _is_unknown_field_error(exc) else source,
+                processing_error=None if _is_unknown_field_error(exc) else processing_error,
+            )
             return self.create_record(
                 self.settings.voice_inbox_base_id,
                 self.settings.voice_inbox_table_id,
@@ -141,19 +190,26 @@ class AirtableClient:
         raw_text: str,
         message_type: str,
         notes: str,
+        external_id: str | None = None,
+        google_drive_url: str | None = None,
+        source: str | None = None,
+        processing_error: str | None = None,
+        processing_status: str = "New",
     ) -> dict:
         fields: dict = {}
         self._set(fields, self.settings.voice_field_title, title)
         self._set(fields, self.settings.voice_field_raw_text, raw_text)
         self._set(fields, self.settings.voice_field_type, message_type)
-        self._set(fields, self.settings.voice_field_processing_status, "New")
+        self._set(fields, self.settings.voice_field_processing_status, processing_status)
         self._set(fields, self.settings.voice_field_notes, notes)
+        self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
         try:
             return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
         except AirtableError as exc:
-            if not self.settings.voice_field_notes or not _is_unknown_field_error(exc):
+            if not _is_unknown_field_error(exc):
                 raise
             fields.pop(self.settings.voice_field_notes, None)
+            self._drop_voice_metadata(fields)
             return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
 
     def upload_voice_attachment(
@@ -191,6 +247,7 @@ class AirtableClient:
         fields: dict = {}
         self._set(fields, self.settings.voice_field_processing_status, "Needs Review")
         self._set(fields, self.settings.voice_field_notes, notes)
+        self._set(fields, self.settings.voice_field_processing_error, notes)
         try:
             return self.update_record(
                 self.settings.voice_inbox_base_id,
@@ -202,6 +259,38 @@ class AirtableClient:
             if not self.settings.voice_field_notes or not _is_unknown_field_error(exc):
                 raise
             fields.pop(self.settings.voice_field_notes, None)
+            self._drop_voice_metadata(fields)
+            return self.update_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                record_id,
+                fields,
+            )
+
+    def update_voice_inbox_metadata(
+        self,
+        record_id: str,
+        *,
+        external_id: str | None = None,
+        google_drive_url: str | None = None,
+        source: str | None = None,
+        processing_error: str | None = None,
+        processing_status: str | None = None,
+    ) -> dict:
+        fields: dict = {}
+        self._set(fields, self.settings.voice_field_processing_status, processing_status)
+        self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
+        try:
+            return self.update_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                record_id,
+                fields,
+            )
+        except AirtableError as exc:
+            if not _is_unknown_field_error(exc):
+                raise
+            self._drop_voice_metadata(fields)
             return self.update_record(
                 self.settings.voice_inbox_base_id,
                 self.settings.voice_inbox_table_id,
@@ -236,6 +325,44 @@ class AirtableClient:
             self._set(minimal, self.settings.items_field_source, "Telegram Voice Inbox")
             return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, minimal)
 
+    def ensure_voice_inbox_metadata_fields(self) -> dict[str, str]:
+        wanted = {
+            self.settings.voice_field_external_id_query_name: "singleLineText",
+            "Google Drive": "url",
+            "Источник": "singleLineText",
+            "Ошибка обработки": "multilineText",
+        }
+        response = self.session.get(
+            f"https://api.airtable.com/v0/meta/bases/{quote(self.settings.voice_inbox_base_id)}/tables",
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise AirtableError(f"Airtable metadata {response.status_code}: {response.text[:500]}")
+
+        table = None
+        for candidate in response.json().get("tables", []):
+            if candidate.get("id") == self.settings.voice_inbox_table_id:
+                table = candidate
+                break
+        if not table:
+            raise AirtableError("Voice Inbox table was not found in Airtable metadata")
+
+        existing = {field.get("name"): field.get("id") for field in table.get("fields", [])}
+        created: dict[str, str] = {}
+        for name, field_type in wanted.items():
+            if not name or name in existing:
+                continue
+            create_response = self.session.post(
+                f"{self._meta_table_url(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id)}/fields",
+                json={"name": name, "type": field_type},
+                timeout=30,
+            )
+            if create_response.status_code >= 400:
+                raise AirtableError(f"Airtable metadata {create_response.status_code}: {create_response.text[:500]}")
+            payload = create_response.json()
+            created[name] = payload.get("id") or ""
+        return created
+
     def _voice_fields(
         self,
         structured: dict,
@@ -244,6 +371,10 @@ class AirtableClient:
         project: ProjectMatch | None,
         *,
         include_optional: bool,
+        external_id: str | None = None,
+        google_drive_url: str | None = None,
+        source: str | None = None,
+        processing_error: str | None = None,
     ) -> dict:
         fields: dict = {}
         self._set(fields, self.settings.voice_field_title, structured.get("title") or _first_line(raw_text))
@@ -260,6 +391,7 @@ class AirtableClient:
                 self._set(fields, self.settings.voice_field_tags, tags[:10])
             if project:
                 self._set(fields, self.settings.voice_field_project, [project.record_id])
+            self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
         return fields
 
     @staticmethod
@@ -269,6 +401,28 @@ class AirtableClient:
         if isinstance(value, str) and not value.strip():
             return
         fields[field_id] = value
+
+    def _set_voice_metadata(
+        self,
+        fields: dict[str, Any],
+        external_id: str | None,
+        google_drive_url: str | None,
+        source: str | None,
+        processing_error: str | None,
+    ) -> None:
+        self._set(fields, self.settings.voice_field_external_id, external_id)
+        self._set(fields, self.settings.voice_field_google_drive, google_drive_url)
+        self._set(fields, self.settings.voice_field_source, source)
+        self._set(fields, self.settings.voice_field_processing_error, processing_error)
+
+    def _drop_voice_metadata(self, fields: dict[str, Any]) -> None:
+        for field in (
+            self.settings.voice_field_external_id,
+            self.settings.voice_field_google_drive,
+            self.settings.voice_field_source,
+            self.settings.voice_field_processing_error,
+        ):
+            fields.pop(field, None)
 
 
 def _first_line(text: str, limit: int = 90) -> str:
@@ -281,5 +435,9 @@ def _first_line(text: str, limit: int = 90) -> str:
 
 
 def _is_unknown_field_error(error: AirtableError) -> bool:
-    text = str(error).upper()
-    return "UNKNOWN_FIELD" in text or "UNKNOWN FIELD" in text
+    return _is_unknown_field_text(str(error))
+
+
+def _is_unknown_field_text(message: str) -> bool:
+    text = message.upper()
+    return "UNKNOWN_FIELD" in text or "UNKNOWN FIELD" in text or "INVALID_FIELD_NAME" in text

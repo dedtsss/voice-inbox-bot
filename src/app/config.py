@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     voice_field_processing_status: str = Field(alias="VOICE_FIELD_PROCESSING_STATUS")
     voice_field_attachments: str = Field(default="fld7RljviBo0ybvnP", alias="VOICE_FIELD_ATTACHMENTS")
     voice_field_notes: str = Field(default="Notes", alias="VOICE_FIELD_NOTES")
+    voice_field_external_id: str = Field(default="External ID", alias="VOICE_FIELD_EXTERNAL_ID")
+    voice_field_external_id_query_name: str = Field(
+        default="External ID",
+        alias="VOICE_FIELD_EXTERNAL_ID_QUERY_NAME",
+    )
+    voice_field_google_drive: str = Field(default="Google Drive", alias="VOICE_FIELD_GOOGLE_DRIVE")
+    voice_field_source: str = Field(default="Источник", alias="VOICE_FIELD_SOURCE")
+    voice_field_processing_error: str = Field(default="Ошибка обработки", alias="VOICE_FIELD_PROCESSING_ERROR")
 
     projects_base_id: str = Field(alias="PROJECTS_BASE_ID")
     projects_table_id: str = Field(alias="PROJECTS_TABLE_ID")
@@ -80,6 +88,13 @@ class Settings(BaseSettings):
         default="https://content.airtable.com/v0",
         alias="AIRTABLE_UPLOAD_BASE_URL",
     )
+    airtable_auto_ensure_fields: bool = Field(default=False, alias="AIRTABLE_AUTO_ENSURE_FIELDS")
+
+    google_drive_enabled: bool = Field(default=False, alias="GOOGLE_DRIVE_ENABLED")
+    google_drive_root_folder_id: str = Field(default="", alias="GOOGLE_DRIVE_ROOT_FOLDER_ID")
+    google_drive_credentials_file: str = Field(default="", alias="GOOGLE_DRIVE_CREDENTIALS_FILE")
+    google_drive_token_file: str = Field(default="", alias="GOOGLE_DRIVE_TOKEN_FILE")
+    google_drive_spool_dir: str = Field(default="/app/data/google_drive_spool", alias="GOOGLE_DRIVE_SPOOL_DIR")
 
     @property
     def allowed_user_ids(self) -> set[int]:

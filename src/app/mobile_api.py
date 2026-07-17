@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePath
@@ -18,6 +19,15 @@ from starlette.datastructures import FormData, UploadFile
 
 from app.airtable import AirtableClient, AirtableError
 from app.config import Settings
+from app.drive_storage import (
+    DriveStorage,
+    DriveStorageError,
+    DriveUploadFile,
+    build_drive_storage,
+    safe_error,
+    spool_drive_item,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +46,13 @@ class MobileFile:
     content: bytes
 
 
-def create_mobile_api(settings: Settings, airtable: AirtableClient) -> FastAPI:
+def create_mobile_api(
+    settings: Settings,
+    airtable: AirtableClient,
+    drive_storage: DriveStorage | None = None,
+) -> FastAPI:
     app = FastAPI(title="Voice Inbox", version="1.1.0")
+    resolved_drive_storage = drive_storage if drive_storage is not None else build_drive_storage(settings)
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
@@ -62,6 +77,51 @@ def create_mobile_api(settings: Settings, airtable: AirtableClient) -> FastAPI:
         message_type = _infer_message_type(payload, text, mobile_files)
         title = _build_title(text, message_type, settings)
         notes = _build_notes(payload, mobile_files, settings)
+        item_id = _extract_item_id(payload)
+        created_at = utc_now()
+
+        existing = await asyncio.to_thread(airtable.find_voice_record_by_external_id, item_id)
+        if existing:
+            return {"ok": True, "remote_id": str(existing.get("id")), "status": "stored"}
+
+        drive_url: str | None = None
+        drive_error: str | None = None
+        drive_files = [
+            DriveUploadFile(name=file.filename, mime_type=file.content_type, content=file.content)
+            for file in mobile_files
+        ]
+        if resolved_drive_storage:
+            try:
+                stored_item = await asyncio.to_thread(
+                    resolved_drive_storage.store_item,
+                    item_id=item_id,
+                    created_at=created_at,
+                    source="android",
+                    message_type=message_type,
+                    text=text or None,
+                    files=drive_files,
+                    extra={"payload": _safe_payload_for_manifest(payload)},
+                )
+                drive_url = stored_item.folder_url
+            except DriveStorageError as exc:
+                drive_error = safe_error(exc)
+                try:
+                    spool_path = await asyncio.to_thread(
+                        spool_drive_item,
+                        settings=settings,
+                        item_id=item_id,
+                        created_at=created_at,
+                        source="android",
+                        message_type=message_type,
+                        text=text or None,
+                        files=drive_files,
+                        error=drive_error,
+                        extra={"payload": _safe_payload_for_manifest(payload)},
+                    )
+                    drive_error = f"{drive_error}; spooled={spool_path}"
+                except Exception as spool_exc:
+                    logger.exception("Could not spool mobile inbox item %s after Google Drive failure", item_id)
+                    drive_error = f"{drive_error}; spool_failed={safe_error(spool_exc)}"
 
         try:
             record = await asyncio.to_thread(
@@ -69,7 +129,12 @@ def create_mobile_api(settings: Settings, airtable: AirtableClient) -> FastAPI:
                 title=title,
                 raw_text=text,
                 message_type=message_type,
-                notes=notes,
+                notes=_notes_with_drive(notes, item_id, drive_url, drive_error),
+                external_id=item_id,
+                google_drive_url=drive_url,
+                source="Android",
+                processing_error=drive_error,
+                processing_status="Needs Review" if drive_error else "New",
             )
         except AirtableError as exc:
             logger.exception("Could not create mobile inbox Airtable record")
@@ -83,6 +148,17 @@ def create_mobile_api(settings: Settings, airtable: AirtableClient) -> FastAPI:
             raise HTTPException(
                 status_code=502,
                 detail={"ok": False, "status": "airtable_create_failed", "error": "Airtable did not return record id"},
+            )
+
+        if drive_error:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "remote_id": record_id,
+                    "status": "drive_upload_failed",
+                    "error": drive_error,
+                },
             )
 
         upload_errors: list[str] = []
@@ -340,6 +416,39 @@ def _build_notes(payload: dict[str, Any], files: list[MobileFile], settings: Set
             f"Files: {len(files)}",
         ]
     )
+
+
+def _extract_item_id(payload: dict[str, Any]) -> str:
+    for key in ("item_id", "id", "external_id", "client_item_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:120]
+    return str(uuid.uuid4())
+
+
+def _safe_payload_for_manifest(payload: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe[str(key)] = value
+        elif isinstance(value, list):
+            safe[str(key)] = value[:20]
+        elif isinstance(value, dict):
+            safe[str(key)] = {
+                str(child_key): child_value
+                for child_key, child_value in value.items()
+                if isinstance(child_value, (str, int, float, bool)) or child_value is None
+            }
+    return safe
+
+
+def _notes_with_drive(notes: str, item_id: str, drive_url: str | None, drive_error: str | None) -> str:
+    lines = [notes, f"External ID: {item_id}"]
+    if drive_url:
+        lines.append(f"Google Drive: {drive_url}")
+    if drive_error:
+        lines.append(f"Google Drive error: {drive_error}")
+    return "\n".join(lines)
 
 
 def _safe_error(exc: Exception) -> str:
