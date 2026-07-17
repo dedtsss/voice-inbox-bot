@@ -14,6 +14,7 @@ Production smoke was executed directly on the VPS over SSH, not through `agent-d
 
 - Previous production commit: `faa2b4b95616a4b16ec08dad82142ebb76d4faa3`
 - Current production commit: `c02aa1c0cfa7c26013d529176e338a9ba4bd1edb`
+- Git changes pushed by this task: report-only commits; production app code remained at `c02aa1c0cfa7c26013d529176e338a9ba4bd1edb`
 - Container: `voice-inbox-bot`
 - Docker image ID: `sha256:4b975d437cf95da9bc3faa8741709d594ec4508a4235f00ec1f53402553f6d43`
 - Container state: `running`
@@ -42,6 +43,8 @@ Backup:
 - Refresh token: present in `/root/.secrets/google-drive-token.json` (value not printed)
 - Token scopes: `https://www.googleapis.com/auth/drive`
 - Publishing status: `In production` (from the tracking issue state; not directly re-queried from the installed-client JSON or authorized-user token). `gcloud` is not installed on the VPS, so the OAuth consent screen publishing status was not independently reverified from production.
+- App verification: not verified; the unverified app warning was noted in the tracking issue state.
+- Temporary seven-day token: no, based on the tracking issue state that token generation happened after production publishing; not independently reverified from the OAuth JSON/token.
 
 Operational note: Drive calls succeeded, but each smoke process printed `Could not persist refreshed Google Drive OAuth token` because the token JSON is mounted read-only. Runtime refresh worked in memory.
 
