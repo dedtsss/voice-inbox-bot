@@ -31,7 +31,7 @@ from app.drive_storage import (
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_MESSAGE_TYPES = {"Text", "Voice", "Photo", "File", "Mixed"}
+ALLOWED_MESSAGE_TYPES = {"Text", "Voice", "Photo", "Video", "File", "Mixed"}
 TEXT_PAYLOAD_KEYS = ("text", "raw_text", "source_text", "message", "caption", "description", "content")
 TYPE_PAYLOAD_KEYS = ("type", "message_type", "kind")
 FILE_FIELD_NAMES = {"files[]", "files"}
@@ -367,6 +367,7 @@ def _payload_message_type(payload: dict[str, Any]) -> str | None:
         "audio": "Voice",
         "photo": "Photo",
         "image": "Photo",
+        "video": "Video",
         "file": "File",
         "mixed": "Mixed",
     }
@@ -385,6 +386,8 @@ def _file_message_type(content_type: str) -> str:
         return "Voice"
     if content_type.startswith("image/"):
         return "Photo"
+    if content_type.startswith("video/"):
+        return "Video"
     return "File"
 
 

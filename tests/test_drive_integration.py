@@ -241,6 +241,22 @@ def test_android_photo_and_text(tmp_path: Path) -> None:
     assert drive.calls[0]["files"][0].mime_type == "image/png"
 
 
+def test_android_video(tmp_path: Path) -> None:
+    drive = FakeDrive()
+    client, settings, airtable, _ = make_client(tmp_path, drive)
+    response = post_item(
+        client,
+        settings,
+        {"item_id": "android-video-1", "type": "video"},
+        [("clip.mp4", b"\x00\x00\x00\x18ftypmp42", "video/mp4")],
+    )
+
+    assert response.status_code == 200
+    assert airtable.created_payloads[0]["message_type"] == "Video"
+    assert drive.calls[0]["files"][0].name == "clip.mp4"
+    assert drive.calls[0]["files"][0].mime_type == "video/mp4"
+
+
 def test_android_multiple_files(tmp_path: Path) -> None:
     drive = FakeDrive()
     client, settings, airtable, _ = make_client(tmp_path, drive)

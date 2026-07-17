@@ -142,7 +142,7 @@ Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
 
 - `Название`: первые слова текста или `Android: <тип> <дата-время>`.
 - `Исходная фраза`: текст из `payload`, если он есть.
-- `Тип`: `Text`, `Voice`, `Photo`, `File` или `Mixed`.
+- `Тип`: `Text`, `Voice`, `Photo`, `Video`, `File` или `Mixed`.
 - `Статус обработки`: `New`.
 - `Notes`: источник `Android Dispatcher` и краткая техническая информация.
 - `Attachments`: файлы, загруженные через Airtable Upload Attachment API.

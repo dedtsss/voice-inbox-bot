@@ -80,7 +80,7 @@ class Settings(BaseSettings):
         default=(
             "audio/aac,audio/mp3,audio/mp4,audio/mpeg,audio/ogg,audio/opus,audio/wav,audio/webm,"
             "audio/x-m4a,image/heic,image/heif,image/jpeg,image/png,image/webp,"
-            "application/json,application/pdf,text/plain"
+            "video/mp4,video/quicktime,video/webm,application/json,application/pdf,text/plain"
         ),
         alias="MOBILE_INBOX_ALLOWED_MIME_TYPES",
     )
