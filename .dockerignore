@@ -6,5 +6,7 @@ __pycache__
 *.pyc
 *.log
 .DS_Store
+data/*
+!data/incoming/
 data/incoming/*
 !data/incoming/.gitkeep
