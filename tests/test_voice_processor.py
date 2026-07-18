@@ -226,6 +226,44 @@ class MetadataPatchSession:
         return FakeAirtableResponse({"id": "fldzeZ9TidyPb1NMa"})
 
 
+class LegacyCreateSession:
+    def __init__(self, *, first_error_text: str = "") -> None:
+        self.first_error_text = first_error_text
+        self.requests: list[dict[str, Any]] = []
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        json: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> FakeAirtableResponse:
+        payload = dict(json or {})
+        self.requests.append(payload)
+        if len(self.requests) == 1 and self.first_error_text:
+            return FakeAirtableResponse({"error": {"message": self.first_error_text}}, status_code=422, text=self.first_error_text)
+        return FakeAirtableResponse({"id": f"rec{len(self.requests)}", "fields": payload.get("fields") or {}})
+
+
+class PatchRecordingSession:
+    def __init__(self) -> None:
+        self.patch_payloads: list[dict[str, Any]] = []
+
+    def patch(
+        self,
+        url: str,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        json: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> FakeAirtableResponse:
+        payload = dict(json or {})
+        self.patch_payloads.append(payload)
+        return FakeAirtableResponse({"id": "rec1", "fields": payload.get("fields") or {}})
+
+
 @dataclass
 class FakeAI:
     outputs: list[Any]
@@ -617,6 +655,86 @@ def test_ensure_voice_processor_schema_adds_processing_choice(tmp_path: Path) ->
 
     assert added == ["Processing"]
     assert session.patch_payloads[0]["options"]["choices"][-1] == {"name": "Processing"}
+
+
+def test_legacy_telegram_create_typecasts_priority_normal(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = LegacyCreateSession()
+    client.session = session  # type: ignore[assignment]
+
+    client.create_voice_inbox_record(
+        structured=valid_ai_result(priority="Normal", tags=[]),
+        raw_text="legacy telegram text",
+        message_type="Text",
+        project=None,
+        external_id="telegram:1:1",
+        source="Telegram",
+    )
+
+    payload = session.requests[0]
+    assert payload["typecast"] is True
+    assert payload["fields"]["Приоритет"] == "Normal"
+
+
+def test_legacy_telegram_create_typecasts_new_tag(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = LegacyCreateSession()
+    client.session = session  # type: ignore[assignment]
+
+    client.create_voice_inbox_record(
+        structured=valid_ai_result(tags=["brand-new-tag"]),
+        raw_text="legacy telegram text",
+        message_type="Text",
+        project=None,
+        external_id="telegram:1:2",
+        source="Telegram",
+    )
+
+    payload = session.requests[0]
+    assert payload["typecast"] is True
+    assert payload["fields"]["Теги"] == ["brand-new-tag"]
+
+
+def test_voice_processor_writeback_does_not_typecast(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = PatchRecordingSession()
+    client.session = session  # type: ignore[assignment]
+
+    client.update_voice_record_fields("rec1", {"Приоритет": "High", "Теги": ["finance"]})
+
+    assert session.patch_payloads == [{"fields": {"Приоритет": "High", "Теги": ["finance"]}}]
+
+
+def test_legacy_invalid_select_fallback_does_not_repeat_same_payload(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = LegacyCreateSession(first_error_text="INVALID_MULTIPLE_CHOICE_OPTIONS: invalid select option")
+    client.session = session  # type: ignore[assignment]
+
+    client.create_voice_inbox_record(
+        structured=valid_ai_result(priority="Normal", tags=["new-tag"]),
+        raw_text="legacy telegram text",
+        message_type="Text",
+        project=None,
+        external_id="telegram:1:3",
+        google_drive_url="https://drive.google.com/drive/folders/folder1",
+        source="Telegram",
+    )
+
+    assert len(session.requests) == 2
+    first_fields = session.requests[0]["fields"]
+    fallback_fields = session.requests[1]["fields"]
+    assert session.requests[0]["typecast"] is True
+    assert session.requests[1]["typecast"] is True
+    assert "Приоритет" in first_fields
+    assert "Теги" in first_fields
+    assert "Приоритет" not in fallback_fields
+    assert "Теги" not in fallback_fields
+    assert fallback_fields["External ID"] == "telegram:1:3"
+    assert fallback_fields != first_fields
 
 
 def test_run_once_honors_batch_size_when_more_records_exist(tmp_path: Path) -> None:

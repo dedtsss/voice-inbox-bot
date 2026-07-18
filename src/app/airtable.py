@@ -228,23 +228,35 @@ class AirtableClient:
             processing_error=processing_error,
         )
         try:
-            return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
+            return self.create_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                fields,
+                typecast=True,
+            )
         except AirtableError as exc:
+            unknown_field = _is_unknown_field_error(exc)
+            optional_payload_error = _is_legacy_optional_payload_error(exc)
+            if not unknown_field and not optional_payload_error:
+                raise
             minimal = self._voice_fields(
                 structured,
                 raw_text,
                 message_type,
                 project,
-                include_optional=not _is_unknown_field_error(exc),
-                external_id=None if _is_unknown_field_error(exc) else external_id,
-                google_drive_url=None if _is_unknown_field_error(exc) else google_drive_url,
-                source=None if _is_unknown_field_error(exc) else source,
-                processing_error=None if _is_unknown_field_error(exc) else processing_error,
+                include_optional=False,
+                external_id=None,
+                google_drive_url=None,
+                source=None,
+                processing_error=None,
             )
+            if optional_payload_error:
+                self._set_voice_metadata(minimal, external_id, google_drive_url, source, processing_error)
             return self.create_record(
                 self.settings.voice_inbox_base_id,
                 self.settings.voice_inbox_table_id,
                 minimal,
+                typecast=True,
             )
 
     def create_mobile_inbox_record(
@@ -268,13 +280,23 @@ class AirtableClient:
         self._set(fields, self.settings.voice_field_notes, notes)
         self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
         try:
-            return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
+            return self.create_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                fields,
+                typecast=True,
+            )
         except AirtableError as exc:
             if not _is_unknown_field_error(exc):
                 raise
             fields.pop(self.settings.voice_field_notes, None)
             self._drop_voice_metadata(fields)
-            return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
+            return self.create_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                fields,
+                typecast=True,
+            )
 
     def upload_voice_attachment(
         self,
@@ -318,6 +340,7 @@ class AirtableClient:
                 self.settings.voice_inbox_table_id,
                 record_id,
                 fields,
+                typecast=True,
             )
         except AirtableError as exc:
             if not self.settings.voice_field_notes or not _is_unknown_field_error(exc):
@@ -329,6 +352,7 @@ class AirtableClient:
                 self.settings.voice_inbox_table_id,
                 record_id,
                 fields,
+                typecast=True,
             )
 
     def update_voice_inbox_metadata(
@@ -350,6 +374,7 @@ class AirtableClient:
                 self.settings.voice_inbox_table_id,
                 record_id,
                 fields,
+                typecast=True,
             )
         except AirtableError as exc:
             if not _is_unknown_field_error(exc):
@@ -360,6 +385,7 @@ class AirtableClient:
                 self.settings.voice_inbox_table_id,
                 record_id,
                 fields,
+                typecast=True,
             )
 
     def list_voice_records_for_processing(self, *, batch_size: int, stale_processing_seconds: int) -> list[dict]:
@@ -467,14 +493,14 @@ class AirtableClient:
         self._set(fields, self.settings.items_field_source, "Telegram Voice Inbox")
         self._set(fields, self.settings.items_field_date, date.today().isoformat())
         try:
-            return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, fields)
+            return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, fields, typecast=True)
         except AirtableError:
             minimal: dict = {}
             self._set(minimal, self.settings.items_field_title, structured.get("title") or _first_line(raw_text))
             self._set(minimal, self.settings.items_field_project, [project.record_id])
             self._set(minimal, self.settings.items_field_text, structured.get("clean_text") or raw_text)
             self._set(minimal, self.settings.items_field_source, "Telegram Voice Inbox")
-            return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, minimal)
+            return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, minimal, typecast=True)
 
     def ensure_voice_inbox_metadata_fields(self) -> dict[str, str]:
         wanted = {
@@ -708,6 +734,20 @@ def _is_unknown_field_error(error: AirtableError) -> bool:
 def _is_unknown_field_text(message: str) -> bool:
     text = message.upper()
     return "UNKNOWN_FIELD" in text or "UNKNOWN FIELD" in text or "INVALID_FIELD_NAME" in text
+
+
+def _is_legacy_optional_payload_error(error: AirtableError) -> bool:
+    text = str(error).upper()
+    return any(
+        marker in text
+        for marker in (
+            "INVALID_MULTIPLE_CHOICE_OPTIONS",
+            "INVALID_SINGLE_SELECT_OPTIONS",
+            "INVALID_VALUE_FOR_COLUMN",
+            "INVALID_VALUE",
+            "CANNOT_PARSE_VALUE",
+        )
+    )
 
 
 def find_field_metadata(table: dict[str, Any], configured_field: str) -> dict[str, Any] | None:
