@@ -257,6 +257,61 @@ class MetadataCreateSession:
         return FakeAirtableResponse({"id": f"fldCreated{len(self.post_payloads)}"})
 
 
+class MetadataChoiceFallbackSession:
+    def __init__(self) -> None:
+        self.has_processing = False
+        self.patch_payloads: list[dict[str, Any]] = []
+        self.request_payloads: list[dict[str, Any]] = []
+        self.deleted_records: list[str] = []
+
+    def get(self, url: str, timeout: int = 30) -> FakeAirtableResponse:
+        choices = [{"id": "selNew", "name": "New", "color": "blueLight2"}]
+        if self.has_processing:
+            choices.append({"id": "selProcessing", "name": "Processing", "color": "blueLight2"})
+        return FakeAirtableResponse(
+            {
+                "tables": [
+                    {
+                        "id": "tblRMsY9zB5tnVfTR",
+                        "name": "Inbox",
+                        "fields": [
+                            {"id": "fldTitle", "name": "Название", "type": "singleLineText"},
+                            {
+                                "id": "fldzeZ9TidyPb1NMa",
+                                "name": "Статус обработки",
+                                "type": "singleSelect",
+                                "options": {"choices": choices},
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+
+    def patch(self, url: str, *, json: dict[str, Any], timeout: int = 30) -> FakeAirtableResponse:
+        self.patch_payloads.append(json)
+        return FakeAirtableResponse({}, status_code=422, text="parameter validation failed")
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        json: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> FakeAirtableResponse:
+        payload = dict(json or {})
+        self.request_payloads.append(payload)
+        if payload.get("fields", {}).get("Статус обработки") == "Processing" and payload.get("typecast") is True:
+            self.has_processing = True
+        return FakeAirtableResponse({"id": "recTypecastCanary", "fields": payload.get("fields") or {}})
+
+    def delete(self, url: str, *, timeout: int = 30) -> FakeAirtableResponse:
+        self.deleted_records.append(url.rsplit("/", 1)[-1])
+        return FakeAirtableResponse({"deleted": True})
+
+
 class LegacyCreateSession:
     def __init__(self, *, first_error_text: str = "") -> None:
         self.first_error_text = first_error_text
@@ -686,6 +741,26 @@ def test_ensure_voice_processor_schema_adds_processing_choice(tmp_path: Path) ->
 
     assert added == ["Processing"]
     assert session.patch_payloads[0]["options"]["choices"][-1] == {"name": "Processing", "color": "blueLight2"}
+
+
+def test_ensure_select_field_choices_falls_back_to_typecast_record(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = MetadataChoiceFallbackSession()
+    client.session = session  # type: ignore[assignment]
+
+    added = client.ensure_select_field_choices(
+        settings.voice_inbox_base_id,
+        settings.voice_inbox_table_id,
+        settings.voice_field_processing_status,
+        ["Processing"],
+        allow_typecast_record_fallback=True,
+    )
+
+    assert added == ["Processing"]
+    assert session.request_payloads[0]["typecast"] is True
+    assert session.request_payloads[0]["fields"]["Статус обработки"] == "Processing"
+    assert session.deleted_records == ["recTypecastCanary"]
 
 
 def test_ensure_voice_processor_schema_creates_checkbox_fields_with_options(tmp_path: Path) -> None:

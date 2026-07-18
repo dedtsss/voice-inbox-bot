@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from datetime import date
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -132,6 +133,15 @@ class AirtableClient:
         )
         if response.status_code >= 400:
             raise AirtableError(f"Airtable {response.status_code}: {response.text[:500]}")
+        return response.json()
+
+    def delete_record(self, base_id: str, table_id: str, record_id: str) -> dict:
+        response = self.session.delete(
+            self._record_url(base_id, table_id, record_id),
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise AirtableError(f"Airtable delete {response.status_code}: {response.text[:500]}")
         return response.json()
 
     def list_tables_metadata(self, base_id: str) -> list[dict]:
@@ -554,6 +564,7 @@ class AirtableClient:
             self.settings.voice_inbox_table_id,
             self.settings.voice_field_processing_status,
             ["Processing"],
+            allow_typecast_record_fallback=True,
         )
         table_id, created_table = self._ensure_processing_rules_table()
         return {
@@ -569,6 +580,8 @@ class AirtableClient:
         table_id: str,
         configured_field: str,
         choices: list[str],
+        *,
+        allow_typecast_record_fallback: bool = False,
     ) -> list[str]:
         table = self.find_table_metadata(base_id, table_id=table_id)
         if not table:
@@ -606,8 +619,66 @@ class AirtableClient:
             timeout=30,
         )
         if response.status_code >= 400:
+            if allow_typecast_record_fallback and response.status_code == 422:
+                return self._ensure_select_choices_via_typecast_record(
+                    base_id,
+                    table_id,
+                    table,
+                    field,
+                    added,
+                )
             raise AirtableError(f"Airtable metadata {response.status_code}: {response.text[:500]}")
         return added
+
+    def _ensure_select_choices_via_typecast_record(
+        self,
+        base_id: str,
+        table_id: str,
+        table: dict[str, Any],
+        field: dict[str, Any],
+        choices: list[str],
+    ) -> list[str]:
+        fields_metadata = table.get("fields") or []
+        primary_field = fields_metadata[0] if fields_metadata else {}
+        primary_name = str(primary_field.get("name") or "").strip()
+        select_name = str(field.get("name") or "").strip()
+        if not primary_name or not select_name:
+            raise AirtableError("Airtable typecast fallback could not identify required field names")
+
+        created_ids: list[str] = []
+        try:
+            for choice in choices:
+                payload = {
+                    primary_name: f"schema ensure temporary record for {choice}",
+                    select_name: choice,
+                }
+                created = self.create_record(base_id, table_id, payload, typecast=True)
+                record_id = str(created.get("id") or "")
+                if not record_id:
+                    raise AirtableError("Airtable typecast fallback did not return a record id")
+                created_ids.append(record_id)
+        finally:
+            delete_errors: list[str] = []
+            for record_id in created_ids:
+                try:
+                    self.delete_record(base_id, table_id, record_id)
+                except AirtableError as exc:
+                    delete_errors.append(str(exc))
+            if delete_errors:
+                raise AirtableError("; ".join(delete_errors))
+
+        for _ in range(3):
+            verified_table = self.find_table_metadata(base_id, table_id=table_id)
+            verified_field = find_field_metadata(verified_table or {}, select_name)
+            verified_names = {
+                str(choice.get("name") or "").strip().casefold()
+                for choice in ((verified_field or {}).get("options") or {}).get("choices") or []
+            }
+            missing = [choice for choice in choices if choice.casefold() not in verified_names]
+            if not missing:
+                return choices
+            time.sleep(1)
+        raise AirtableError("Airtable typecast fallback did not create all select choices")
 
     def _ensure_fields(self, base_id: str, table_id: str, fields: list[dict[str, Any]]) -> dict[str, str]:
         table = self.find_table_metadata(base_id, table_id=table_id)
