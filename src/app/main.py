@@ -29,6 +29,7 @@ from app.drive_storage import (
 )
 from app.mobile_api import create_mobile_api
 from app.openai_ops import OpenAIProcessor
+from app.voice_processor import make_processor
 
 logger = logging.getLogger(__name__)
 
@@ -504,10 +505,18 @@ async def main() -> None:
     telegram_task = asyncio.create_task(run_telegram_polling(settings, bot, dispatcher), name="telegram-polling")
     http_task = asyncio.create_task(server.serve(), name="http-api")
     shutdown_task = asyncio.create_task(stop_event.wait(), name="shutdown-signal")
+    processor_task = (
+        asyncio.create_task(make_processor(settings).run_loop(stop_event), name="voice-processor")
+        if settings.voice_processor_enabled
+        else None
+    )
+    running_tasks = {telegram_task, http_task, shutdown_task}
+    if processor_task:
+        running_tasks.add(processor_task)
 
     try:
         done, _ = await asyncio.wait(
-            {telegram_task, http_task, shutdown_task},
+            running_tasks,
             return_when=asyncio.FIRST_COMPLETED,
         )
         if shutdown_task in done:
@@ -522,6 +531,8 @@ async def main() -> None:
                 await dispatcher.stop_polling()
         await stop_task(http_task, timeout=30)
         await stop_task(telegram_task, timeout=30)
+        if processor_task:
+            await stop_task(processor_task, timeout=30)
         shutdown_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await shutdown_task

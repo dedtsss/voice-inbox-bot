@@ -12,6 +12,7 @@ MVP-логика:
 6. Если проект определён уверенно, дополнительно создаёт запись в `Projects OS / Items`.
 7. Возвращает краткую карточку в Telegram.
 8. Принимает записи из Android Dispatcher по HTTPS/HTTP API и сохраняет их в тот же Airtable `Voice Inbox`.
+9. Опционально запускает multimodal processor для Android raw-записей из Google Drive, если `VOICE_PROCESSOR_ENABLED=true`.
 
 ## Быстрый старт
 
@@ -96,8 +97,10 @@ docker compose logs -f
 - HTTP API запускается в том же контейнере и слушает `HTTP_PORT`, по умолчанию `8080`.
 - Для production Android должен использовать HTTPS URL reverse proxy или Cloudflare Tunnel, не прямой HTTP.
 - Доступ ограничивается `ALLOWED_TELEGRAM_USER_IDS`.
-- Фото в MVP обрабатываются по подписи. Анализ изображения добавим позже.
+- Telegram-фото в текущем pipeline по-прежнему обрабатываются по подписи, чтобы не менять работающий Telegram ingest.
+- Android raw-записи могут обрабатываться отдельным Drive-based processor, но он выключен по умолчанию.
 - Если проект не найден в Airtable, запись остаётся только в `Voice Inbox`.
+- `Voice Inbox / Проект` — `singleSelect`: код пишет туда только имя существующего choice, не record ID из `Projects OS`.
 - Для `Projects OS / Items` типы приводятся к уже существующим значениям Airtable.
 - Android-записи при `ANDROID_RAW_MODE=true` сохраняются сырыми: OpenAI-транскрипция и структурирование для них не запускаются.
 
@@ -171,7 +174,7 @@ Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
 
 Внутри сохраняются:
 
-- `manifest.json` с `item_id`, source, type, text и Drive file IDs;
+- `manifest.json` с `item_id`, source, type, text, Drive file IDs, size и SHA-256 для оригиналов;
 - оригинальные файлы без перекодирования;
 - Telegram audio дополнительно конвертируется во временный MP3 только для текущей OpenAI-транскрипции, но в Drive кладётся оригинал.
 
@@ -187,6 +190,133 @@ Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
 ```bash
 PYTHONPATH=src python scripts/ensure_airtable_fields.py
 ```
+
+Этот script idempotent: он добавляет metadata поля Drive ingest, feedback поля processor, choice `Processing` в `Статус обработки` и таблицу `Правила обработки`, если они ещё отсутствуют.
+
+## Multimodal Voice Processor
+
+Processor живёт в этом же backend и использует существующие Airtable, Google Drive и OpenAI credentials. При `VOICE_PROCESSOR_ENABLED=false` он не создаётся и не запускает Drive/OpenAI код.
+
+Что делает worker:
+
+1. Берёт не больше `VOICE_PROCESSOR_BATCH_SIZE` записей `Voice Inbox / Inbox` со `Статус обработки = New` или stale `Processing`.
+2. Claims запись через заранее существующий choice `Processing`, lock trace и bounded attempt count в `Ошибка обработки`.
+3. Читает Drive folder URL, `manifest.json` и потоково скачивает оригиналы во временную директорию с лимитами размера и проверкой size/SHA-256.
+4. Обрабатывает text/audio/photo/video/mixed: audio transcription, vision analysis для images, video audio + representative frames.
+5. Отправляет итоговый контекст в OpenAI Structured Outputs со strict JSON Schema.
+6. Валидирует project по choices самого поля `Voice Inbox / Проект` и остальные select values по текущим Airtable options.
+7. Обновляет ту же Airtable запись, пишет в `Проект` имя singleSelect choice, сохраняет `AI результат JSON`, confidence и processor version.
+8. При низкой уверенности, неизвестном проекте/type/select conflict ставит `Needs Review`.
+9. Создаёт persistent learning rule только если пользователь явно отметил `Обучить на исправлении`.
+
+Processor не создаёт Projects OS tasks в первой версии. `VOICE_PROCESSOR_CREATE_PROJECT_ITEMS=false` оставлен как future guard; legacy alias `PROCESSOR_CREATE_PROJECT_ITEMS=false` тоже принимается.
+
+V1 processor рассчитан строго на один running worker. Текущий lock trace нужен для recovery и диагностики, но не является атомарной межпроцессной блокировкой Airtable. Не запускайте второй контейнер, `docker compose --scale`, cron-копию или ручной batch параллельно с включённым `VOICE_PROCESSOR_ENABLED=true`.
+
+### Processor env
+
+```env
+VOICE_PROCESSOR_ENABLED=false
+VOICE_PROCESSOR_INTERVAL_SECONDS=60
+VOICE_PROCESSOR_BATCH_SIZE=5
+VOICE_PROCESSOR_TEXT_MODEL=gpt-4o-mini
+VOICE_PROCESSOR_TRANSCRIPTION_MODEL=gpt-4o-transcribe
+VOICE_PROCESSOR_CONFIDENCE_THRESHOLD=0.80
+VOICE_PROCESSOR_MAX_VIDEO_FRAMES=12
+VOICE_PROCESSOR_VIDEO_FRAME_INTERVAL_SECONDS=5
+VOICE_PROCESSOR_CREATE_PROJECT_ITEMS=false
+VOICE_PROCESSOR_VERSION=v1
+VOICE_PROCESSOR_STALE_PROCESSING_SECONDS=900
+VOICE_PROCESSOR_MAX_RETRIES=3
+VOICE_PROCESSOR_RETRY_BASE_SECONDS=1
+VOICE_PROCESSOR_MAX_PROMPT_CHARS=24000
+VOICE_PROCESSOR_MAX_RULES=8
+VOICE_PROCESSOR_MAX_FILE_BYTES=25000000
+VOICE_PROCESSOR_MAX_RECORD_BYTES=50000000
+VOICE_PROCESSOR_MAX_IMAGE_BYTES=4000000
+VOICE_PROCESSOR_IMAGE_MAX_EDGE=1600
+VOICE_PROCESSOR_RULES_TABLE_ID=
+VOICE_PROCESSOR_RULES_TABLE_NAME=Правила обработки
+VOICE_FIELD_DUE_DATE=Срок
+VOICE_FIELD_COUNTERPARTY=Контрагент
+VOICE_FIELD_AMOUNT=Сумма
+VOICE_FIELD_PERIOD=Период
+VOICE_FIELD_AI_RESULT_JSON=AI результат JSON
+VOICE_FIELD_AI_CONFIDENCE=Уверенность AI
+VOICE_FIELD_PROCESSOR_VERSION=Версия обработчика
+VOICE_FIELD_TRAIN_ON_CORRECTION=Обучить на исправлении
+VOICE_FIELD_CORRECTION_COMMENT=Комментарий к исправлению
+VOICE_FIELD_TRAINING_APPLIED=Обучение учтено
+VOICE_FIELD_PROCESSING_STATUS_QUERY_NAME=Статус обработки
+```
+
+### Commands
+
+Run one disabled no-op check:
+
+```bash
+PYTHONPATH=src python -m app.voice_processor --once
+```
+
+Run exactly one controlled Airtable smoke record while global polling remains disabled:
+
+```bash
+PYTHONPATH=src python -m app.voice_processor \
+  --record-id recXXXXXXXXXXXXXX \
+  --ignore-enabled-flag
+```
+
+Run one batch manually:
+
+```bash
+PYTHONPATH=src python -m app.voice_processor \
+  --once \
+  --batch-size 1 \
+  --ignore-enabled-flag
+```
+
+In Docker:
+
+```bash
+docker compose run --rm voice-inbox-bot \
+  python -m app.voice_processor --record-id recXXXXXXXXXXXXXX --ignore-enabled-flag
+```
+
+### Correction learning UX
+
+1. Processor writes `AI результат JSON` before user edits.
+2. User manually fixes Airtable structured fields.
+3. User checks `Обучить на исправлении` only when the correction should become a reusable rule.
+4. Processor compares current fields with the AI snapshot, creates one concise active rule in `Правила обработки`, sets `Обучение учтено = true`, and clears `Обучить на исправлении`.
+5. Manual edits without the checkbox are ignored by learning.
+
+### Safe deploy
+
+1. Merge and deploy with `VOICE_PROCESSOR_ENABLED=false`.
+2. Run `PYTHONPATH=src python scripts/ensure_airtable_fields.py` once with an Airtable token that has schema permissions, so `Processing` is an explicit existing select choice.
+3. Restart the container and verify Telegram plus `/health`.
+4. Create or choose one controlled smoke record with Drive originals.
+5. Run the one-record command with `--record-id ... --ignore-enabled-flag`.
+6. Confirm same Airtable record was updated, `AI результат JSON` is present, temp media is gone, and no duplicate processing happened.
+7. Confirm there is only one processor instance for the deployment.
+8. Only after smoke passes, set `VOICE_PROCESSOR_ENABLED=true` with `VOICE_PROCESSOR_BATCH_SIZE=1`, then increase cautiously.
+
+### Rollback
+
+```bash
+docker compose down
+git checkout <previous_good_commit>
+docker compose up -d --build
+```
+
+Fast disable without code rollback:
+
+```bash
+VOICE_PROCESSOR_ENABLED=false
+docker compose up -d
+```
+
+Records left in `Processing` recover automatically after `VOICE_PROCESSOR_STALE_PROCESSING_SECONDS`, or can be manually set back to `New`.
 
 Для OAuth 2.0 offline access:
 
@@ -220,7 +350,7 @@ curl -sS https://<domain>/api/mobile-inbox/items \
 
 - Кнопки: `Записать в проект`, `Оставить в Inbox`, `Удалить`.
 - Очередь задач для долгих аудио.
-- Анализ фото через vision-модель.
+- Vision-анализ для Telegram-фото в основном Telegram pipeline.
 - GigaAM как альтернатива OpenAI Speech-to-Text.
 - Команды `/inbox`, `/projects`, `/today`, `/last`.
 - Сохранение ссылок на медиафайлы в Airtable.

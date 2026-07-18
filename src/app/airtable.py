@@ -41,6 +41,9 @@ class AirtableClient:
     def _meta_table_url(self, base_id: str, table_id: str) -> str:
         return f"https://api.airtable.com/v0/meta/bases/{quote(base_id)}/tables/{quote(table_id, safe='')}"
 
+    def _meta_tables_url(self, base_id: str) -> str:
+        return f"https://api.airtable.com/v0/meta/bases/{quote(base_id)}/tables"
+
     def _request(
         self,
         method: str,
@@ -61,25 +64,86 @@ class AirtableClient:
             raise AirtableError(f"Airtable {response.status_code}: {response.text[:500]}")
         return response.json()
 
-    def create_record(self, base_id: str, table_id: str, fields: dict) -> dict:
+    def create_record(self, base_id: str, table_id: str, fields: dict, *, typecast: bool = False) -> dict:
+        body: dict[str, Any] = {"fields": fields}
+        if typecast:
+            body["typecast"] = True
         return self._request(
             "POST",
             base_id,
             table_id,
             params=[("returnFieldsByFieldId", "true")],
-            json_body={"fields": fields, "typecast": True},
+            json_body=body,
         )
 
-    def update_record(self, base_id: str, table_id: str, record_id: str, fields: dict) -> dict:
+    def list_records(
+        self,
+        base_id: str,
+        table_id: str,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        max_records: int | None = None,
+    ) -> list[dict]:
+        if max_records is not None and max_records <= 0:
+            return []
+        records: list[dict] = []
+        offset: str | None = None
+        while True:
+            request_params = list(params or [])
+            if offset:
+                request_params.append(("offset", offset))
+            payload = self._request("GET", base_id, table_id, params=request_params)
+            records.extend(payload.get("records") or [])
+            if max_records is not None and len(records) >= max_records:
+                return records[:max_records]
+            offset = payload.get("offset")
+            if not offset:
+                return records
+
+    def update_record(
+        self,
+        base_id: str,
+        table_id: str,
+        record_id: str,
+        fields: dict,
+        *,
+        typecast: bool = False,
+    ) -> dict:
+        body: dict[str, Any] = {"fields": fields}
+        if typecast:
+            body["typecast"] = True
         response = self.session.patch(
             self._record_url(base_id, table_id, record_id),
             params=[("returnFieldsByFieldId", "true")],
-            json={"fields": fields, "typecast": True},
+            json=body,
             timeout=30,
         )
         if response.status_code >= 400:
             raise AirtableError(f"Airtable {response.status_code}: {response.text[:500]}")
         return response.json()
+
+    def fetch_record(self, base_id: str, table_id: str, record_id: str) -> dict:
+        response = self.session.get(
+            self._record_url(base_id, table_id, record_id),
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise AirtableError(f"Airtable {response.status_code}: {response.text[:500]}")
+        return response.json()
+
+    def list_tables_metadata(self, base_id: str) -> list[dict]:
+        response = self.session.get(self._meta_tables_url(base_id), timeout=30)
+        if response.status_code >= 400:
+            raise AirtableError(f"Airtable metadata {response.status_code}: {response.text[:500]}")
+        return response.json().get("tables") or []
+
+    def find_table_metadata(self, base_id: str, *, table_id: str = "", table_name: str = "") -> dict | None:
+        for table in self.list_tables_metadata(base_id):
+            if table_id and table.get("id") == table_id:
+                return table
+            if table_name and table.get("name") == table_name:
+                return table
+        return None
 
     def find_voice_record_by_external_id(self, external_id: str) -> dict | None:
         if not external_id.strip() or not self.settings.voice_field_external_id_query_name:
@@ -164,23 +228,35 @@ class AirtableClient:
             processing_error=processing_error,
         )
         try:
-            return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
+            return self.create_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                fields,
+                typecast=True,
+            )
         except AirtableError as exc:
+            unknown_field = _is_unknown_field_error(exc)
+            optional_payload_error = _is_legacy_optional_payload_error(exc)
+            if not unknown_field and not optional_payload_error:
+                raise
             minimal = self._voice_fields(
                 structured,
                 raw_text,
                 message_type,
                 project,
-                include_optional=not _is_unknown_field_error(exc),
-                external_id=None if _is_unknown_field_error(exc) else external_id,
-                google_drive_url=None if _is_unknown_field_error(exc) else google_drive_url,
-                source=None if _is_unknown_field_error(exc) else source,
-                processing_error=None if _is_unknown_field_error(exc) else processing_error,
+                include_optional=False,
+                external_id=None,
+                google_drive_url=None,
+                source=None,
+                processing_error=None,
             )
+            if optional_payload_error:
+                self._set_voice_metadata(minimal, external_id, google_drive_url, source, processing_error)
             return self.create_record(
                 self.settings.voice_inbox_base_id,
                 self.settings.voice_inbox_table_id,
                 minimal,
+                typecast=True,
             )
 
     def create_mobile_inbox_record(
@@ -204,13 +280,23 @@ class AirtableClient:
         self._set(fields, self.settings.voice_field_notes, notes)
         self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
         try:
-            return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
+            return self.create_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                fields,
+                typecast=True,
+            )
         except AirtableError as exc:
             if not _is_unknown_field_error(exc):
                 raise
             fields.pop(self.settings.voice_field_notes, None)
             self._drop_voice_metadata(fields)
-            return self.create_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, fields)
+            return self.create_record(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                fields,
+                typecast=True,
+            )
 
     def upload_voice_attachment(
         self,
@@ -254,6 +340,7 @@ class AirtableClient:
                 self.settings.voice_inbox_table_id,
                 record_id,
                 fields,
+                typecast=True,
             )
         except AirtableError as exc:
             if not self.settings.voice_field_notes or not _is_unknown_field_error(exc):
@@ -265,6 +352,7 @@ class AirtableClient:
                 self.settings.voice_inbox_table_id,
                 record_id,
                 fields,
+                typecast=True,
             )
 
     def update_voice_inbox_metadata(
@@ -286,6 +374,7 @@ class AirtableClient:
                 self.settings.voice_inbox_table_id,
                 record_id,
                 fields,
+                typecast=True,
             )
         except AirtableError as exc:
             if not _is_unknown_field_error(exc):
@@ -296,7 +385,95 @@ class AirtableClient:
                 self.settings.voice_inbox_table_id,
                 record_id,
                 fields,
+                typecast=True,
             )
+
+    def list_voice_records_for_processing(self, *, batch_size: int, stale_processing_seconds: int) -> list[dict]:
+        limit = max(1, batch_size)
+        status_field = self.settings.voice_field_processing_status_query_name or self.settings.voice_field_processing_status
+        formula = (
+            f"OR("
+            f"{{{status_field}}} = 'New',"
+            f"AND("
+            f"{{{status_field}}} = 'Processing',"
+            f"IS_BEFORE(LAST_MODIFIED_TIME({{{status_field}}}), "
+            f"DATEADD(NOW(), -{max(1, stale_processing_seconds)}, 'seconds'))"
+            f")"
+            f")"
+        )
+        return self.list_records(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            params=[
+                ("pageSize", str(min(limit, 100))),
+                ("maxRecords", str(limit)),
+                ("filterByFormula", formula),
+                ("sort[0][field]", status_field),
+                ("sort[0][direction]", "asc"),
+            ],
+            max_records=limit,
+        )
+
+    def list_voice_correction_candidates(self, *, page_size: int = 50, max_records: int | None = None) -> list[dict]:
+        limit = max(1, max_records if max_records is not None else page_size)
+        train_field = self.settings.voice_field_train_on_correction
+        applied_field = self.settings.voice_field_training_applied
+        formula = f"AND({{{train_field}}} = TRUE(), NOT({{{applied_field}}} = TRUE()))"
+        return self.list_records(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            params=[
+                ("pageSize", str(min(limit, page_size, 100))),
+                ("maxRecords", str(limit)),
+                ("filterByFormula", formula),
+            ],
+            max_records=limit,
+        )
+
+    def fetch_voice_record(self, record_id: str) -> dict:
+        return self.fetch_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, record_id)
+
+    def update_voice_record_fields(self, record_id: str, fields: dict[str, Any]) -> dict:
+        return self.update_record(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            record_id,
+            fields,
+        )
+
+    def rules_table_id(self) -> str | None:
+        if self.settings.voice_processor_rules_table_id:
+            return self.settings.voice_processor_rules_table_id
+        table = self.find_table_metadata(
+            self.settings.voice_inbox_base_id,
+            table_name=self.settings.voice_processor_rules_table_name,
+        )
+        if not table:
+            return None
+        table_id = table.get("id")
+        return str(table_id) if table_id else None
+
+    def list_processing_rules(self, *, active_only: bool = True, page_size: int = 100) -> list[dict]:
+        table_id = self.rules_table_id()
+        if not table_id:
+            return []
+        params: list[tuple[str, str]] = [("pageSize", str(max(1, min(page_size, 100))))]
+        params.append(("maxRecords", str(max(1, page_size))))
+        if active_only:
+            params.append(("filterByFormula", "{Активно} = TRUE()"))
+        return self.list_records(self.settings.voice_inbox_base_id, table_id, params=params, max_records=max(1, page_size))
+
+    def create_processing_rule(self, fields: dict[str, Any]) -> dict:
+        table_id = self.rules_table_id()
+        if not table_id:
+            raise AirtableError("Airtable processing rules table was not found")
+        return self.create_record(self.settings.voice_inbox_base_id, table_id, fields)
+
+    def update_processing_rule_fields(self, record_id: str, fields: dict[str, Any]) -> dict:
+        table_id = self.rules_table_id()
+        if not table_id:
+            raise AirtableError("Airtable processing rules table was not found")
+        return self.update_record(self.settings.voice_inbox_base_id, table_id, record_id, fields)
 
     def create_project_item(
         self,
@@ -316,14 +493,14 @@ class AirtableClient:
         self._set(fields, self.settings.items_field_source, "Telegram Voice Inbox")
         self._set(fields, self.settings.items_field_date, date.today().isoformat())
         try:
-            return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, fields)
+            return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, fields, typecast=True)
         except AirtableError:
             minimal: dict = {}
             self._set(minimal, self.settings.items_field_title, structured.get("title") or _first_line(raw_text))
             self._set(minimal, self.settings.items_field_project, [project.record_id])
             self._set(minimal, self.settings.items_field_text, structured.get("clean_text") or raw_text)
             self._set(minimal, self.settings.items_field_source, "Telegram Voice Inbox")
-            return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, minimal)
+            return self.create_record(self.settings.projects_base_id, self.settings.items_table_id, minimal, typecast=True)
 
     def ensure_voice_inbox_metadata_fields(self) -> dict[str, str]:
         wanted = {
@@ -332,18 +509,7 @@ class AirtableClient:
             "Источник": "singleLineText",
             "Ошибка обработки": "multilineText",
         }
-        response = self.session.get(
-            f"https://api.airtable.com/v0/meta/bases/{quote(self.settings.voice_inbox_base_id)}/tables",
-            timeout=30,
-        )
-        if response.status_code >= 400:
-            raise AirtableError(f"Airtable metadata {response.status_code}: {response.text[:500]}")
-
-        table = None
-        for candidate in response.json().get("tables", []):
-            if candidate.get("id") == self.settings.voice_inbox_table_id:
-                table = candidate
-                break
+        table = self.find_table_metadata(self.settings.voice_inbox_base_id, table_id=self.settings.voice_inbox_table_id)
         if not table:
             raise AirtableError("Voice Inbox table was not found in Airtable metadata")
 
@@ -362,6 +528,133 @@ class AirtableClient:
             payload = create_response.json()
             created[name] = payload.get("id") or ""
         return created
+
+    def ensure_voice_processor_schema(self) -> dict[str, Any]:
+        created_fields = self._ensure_fields(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            [
+                {"name": self.settings.voice_field_ai_result_json, "type": "multilineText"},
+                {
+                    "name": self.settings.voice_field_ai_confidence,
+                    "type": "number",
+                    "options": {"precision": 2},
+                },
+                {"name": self.settings.voice_field_processor_version, "type": "singleLineText"},
+                {"name": self.settings.voice_field_train_on_correction, "type": "checkbox"},
+                {"name": self.settings.voice_field_correction_comment, "type": "multilineText"},
+                {"name": self.settings.voice_field_training_applied, "type": "checkbox"},
+            ],
+        )
+        added_status_choices = self.ensure_select_field_choices(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            self.settings.voice_field_processing_status,
+            ["Processing"],
+        )
+        table_id, created_table = self._ensure_processing_rules_table()
+        return {
+            "created_fields": created_fields,
+            "added_status_choices": added_status_choices,
+            "rules_table_id": table_id,
+            "created_rules_table": created_table,
+        }
+
+    def ensure_select_field_choices(
+        self,
+        base_id: str,
+        table_id: str,
+        configured_field: str,
+        choices: list[str],
+    ) -> list[str]:
+        table = self.find_table_metadata(base_id, table_id=table_id)
+        if not table:
+            raise AirtableError("Airtable table was not found in metadata")
+        field = find_field_metadata(table, configured_field)
+        if not field:
+            raise AirtableError(f"Airtable field {configured_field!r} was not found in metadata")
+        if field.get("type") not in {"singleSelect", "multipleSelects"}:
+            raise AirtableError(f"Airtable field {field.get('name') or configured_field} is not a select field")
+
+        existing_choices = list((field.get("options") or {}).get("choices") or [])
+        existing_names = {
+            str(choice.get("name") or "").strip().casefold()
+            for choice in existing_choices
+            if str(choice.get("name") or "").strip()
+        }
+        added: list[str] = []
+        next_choices = list(existing_choices)
+        for choice in choices:
+            name = str(choice or "").strip()
+            if not name or name.casefold() in existing_names:
+                continue
+            next_choices.append({"name": name})
+            existing_names.add(name.casefold())
+            added.append(name)
+        if not added:
+            return []
+
+        field_id = str(field.get("id") or "")
+        if not field_id:
+            raise AirtableError("Airtable select field has no id")
+        response = self.session.patch(
+            f"{self._meta_table_url(base_id, table_id)}/fields/{quote(field_id, safe='')}",
+            json={"options": {"choices": next_choices}},
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise AirtableError(f"Airtable metadata {response.status_code}: {response.text[:500]}")
+        return added
+
+    def _ensure_fields(self, base_id: str, table_id: str, fields: list[dict[str, Any]]) -> dict[str, str]:
+        table = self.find_table_metadata(base_id, table_id=table_id)
+        if not table:
+            raise AirtableError("Airtable table was not found in metadata")
+        existing = {field.get("name"): field.get("id") for field in table.get("fields", [])}
+        created: dict[str, str] = {}
+        for field in fields:
+            name = field.get("name")
+            if not name or name in existing:
+                continue
+            create_response = self.session.post(
+                f"{self._meta_table_url(base_id, table_id)}/fields",
+                json={key: value for key, value in field.items() if value is not None},
+                timeout=30,
+            )
+            if create_response.status_code >= 400:
+                raise AirtableError(f"Airtable metadata {create_response.status_code}: {create_response.text[:500]}")
+            payload = create_response.json()
+            created[name] = payload.get("id") or ""
+        return created
+
+    def _ensure_processing_rules_table(self) -> tuple[str, bool]:
+        table = self.find_table_metadata(
+            self.settings.voice_inbox_base_id,
+            table_id=self.settings.voice_processor_rules_table_id,
+            table_name=self.settings.voice_processor_rules_table_name,
+        )
+        if table:
+            table_id = str(table.get("id") or "")
+            if not table_id:
+                raise AirtableError("Airtable processing rules table has no id")
+            self._ensure_fields(self.settings.voice_inbox_base_id, table_id, processing_rule_fields(primary=False))
+            return table_id, False
+
+        create_response = self.session.post(
+            self._meta_tables_url(self.settings.voice_inbox_base_id),
+            json={
+                "name": self.settings.voice_processor_rules_table_name,
+                "fields": processing_rule_fields(primary=True),
+            },
+            timeout=30,
+        )
+        if create_response.status_code >= 400:
+            raise AirtableError(f"Airtable metadata {create_response.status_code}: {create_response.text[:500]}")
+        payload = create_response.json()
+        table_id = str(payload.get("id") or "")
+        if not table_id:
+            raise AirtableError("Airtable processing rules table create did not return id")
+        return table_id, True
 
     def _voice_fields(
         self,
@@ -390,7 +683,7 @@ class AirtableClient:
             if isinstance(tags, list) and tags:
                 self._set(fields, self.settings.voice_field_tags, tags[:10])
             if project:
-                self._set(fields, self.settings.voice_field_project, [project.record_id])
+                self._set(fields, self.settings.voice_field_project, project.title)
             self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
         return fields
 
@@ -441,3 +734,67 @@ def _is_unknown_field_error(error: AirtableError) -> bool:
 def _is_unknown_field_text(message: str) -> bool:
     text = message.upper()
     return "UNKNOWN_FIELD" in text or "UNKNOWN FIELD" in text or "INVALID_FIELD_NAME" in text
+
+
+def _is_legacy_optional_payload_error(error: AirtableError) -> bool:
+    text = str(error).upper()
+    return any(
+        marker in text
+        for marker in (
+            "INVALID_MULTIPLE_CHOICE_OPTIONS",
+            "INVALID_SINGLE_SELECT_OPTIONS",
+            "INVALID_VALUE_FOR_COLUMN",
+            "INVALID_VALUE",
+            "CANNOT_PARSE_VALUE",
+        )
+    )
+
+
+def find_field_metadata(table: dict[str, Any], configured_field: str) -> dict[str, Any] | None:
+    if not configured_field:
+        return None
+    for field in table.get("fields") or []:
+        if configured_field in {field.get("id"), field.get("name")}:
+            return field
+    return None
+
+
+def processing_rule_fields(*, primary: bool) -> list[dict[str, Any]]:
+    fields = [
+        {"name": "Правило", "type": "singleLineText"},
+        {"name": "Активно", "type": "checkbox"},
+        {
+            "name": "Область",
+            "type": "singleSelect",
+            "options": {
+                "choices": [
+                    {"name": "Все"},
+                    {"name": "Маршрутизация"},
+                    {"name": "Тип"},
+                    {"name": "Приоритет"},
+                    {"name": "Извлечение"},
+                    {"name": "Следующее действие"},
+                ]
+            },
+        },
+        {"name": "Условие", "type": "multilineText"},
+        {"name": "Правильное решение", "type": "multilineText"},
+        {"name": "Проект", "type": "singleLineText"},
+        {"name": "Тип", "type": "singleLineText"},
+        {"name": "Положительный пример", "type": "multilineText"},
+        {"name": "Источник записи", "type": "singleLineText"},
+        {"name": "Комментарий пользователя", "type": "multilineText"},
+        {"name": "Использований", "type": "number", "options": {"precision": 0}},
+        {
+            "name": "Последнее использование",
+            "type": "dateTime",
+            "options": {
+                "dateFormat": {"name": "iso"},
+                "timeFormat": {"name": "24hour"},
+                "timeZone": "utc",
+            },
+        },
+    ]
+    if primary:
+        return fields
+    return fields[1:]

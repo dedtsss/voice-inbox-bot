@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,12 +28,20 @@ class Settings(BaseSettings):
     voice_field_type: str = Field(alias="VOICE_FIELD_TYPE")
     voice_field_project: str = Field(alias="VOICE_FIELD_PROJECT")
     voice_field_priority: str = Field(alias="VOICE_FIELD_PRIORITY")
+    voice_field_due_date: str = Field(default="Срок", alias="VOICE_FIELD_DUE_DATE")
+    voice_field_counterparty: str = Field(default="Контрагент", alias="VOICE_FIELD_COUNTERPARTY")
+    voice_field_amount: str = Field(default="Сумма", alias="VOICE_FIELD_AMOUNT")
+    voice_field_period: str = Field(default="Период", alias="VOICE_FIELD_PERIOD")
     voice_field_next_action: str = Field(alias="VOICE_FIELD_NEXT_ACTION")
     voice_field_summary: str = Field(alias="VOICE_FIELD_SUMMARY")
     voice_field_clean_text: str = Field(alias="VOICE_FIELD_CLEAN_TEXT")
     voice_field_raw_text: str = Field(alias="VOICE_FIELD_RAW_TEXT")
     voice_field_tags: str = Field(alias="VOICE_FIELD_TAGS")
     voice_field_processing_status: str = Field(alias="VOICE_FIELD_PROCESSING_STATUS")
+    voice_field_processing_status_query_name: str = Field(
+        default="Статус обработки",
+        alias="VOICE_FIELD_PROCESSING_STATUS_QUERY_NAME",
+    )
     voice_field_attachments: str = Field(default="fld7RljviBo0ybvnP", alias="VOICE_FIELD_ATTACHMENTS")
     voice_field_notes: str = Field(default="Notes", alias="VOICE_FIELD_NOTES")
     voice_field_external_id: str = Field(default="External ID", alias="VOICE_FIELD_EXTERNAL_ID")
@@ -44,6 +52,18 @@ class Settings(BaseSettings):
     voice_field_google_drive: str = Field(default="Google Drive", alias="VOICE_FIELD_GOOGLE_DRIVE")
     voice_field_source: str = Field(default="Источник", alias="VOICE_FIELD_SOURCE")
     voice_field_processing_error: str = Field(default="Ошибка обработки", alias="VOICE_FIELD_PROCESSING_ERROR")
+    voice_field_ai_result_json: str = Field(default="AI результат JSON", alias="VOICE_FIELD_AI_RESULT_JSON")
+    voice_field_ai_confidence: str = Field(default="Уверенность AI", alias="VOICE_FIELD_AI_CONFIDENCE")
+    voice_field_processor_version: str = Field(default="Версия обработчика", alias="VOICE_FIELD_PROCESSOR_VERSION")
+    voice_field_train_on_correction: str = Field(
+        default="Обучить на исправлении",
+        alias="VOICE_FIELD_TRAIN_ON_CORRECTION",
+    )
+    voice_field_correction_comment: str = Field(
+        default="Комментарий к исправлению",
+        alias="VOICE_FIELD_CORRECTION_COMMENT",
+    )
+    voice_field_training_applied: str = Field(default="Обучение учтено", alias="VOICE_FIELD_TRAINING_APPLIED")
 
     projects_base_id: str = Field(alias="PROJECTS_BASE_ID")
     projects_table_id: str = Field(alias="PROJECTS_TABLE_ID")
@@ -89,6 +109,40 @@ class Settings(BaseSettings):
         alias="AIRTABLE_UPLOAD_BASE_URL",
     )
     airtable_auto_ensure_fields: bool = Field(default=False, alias="AIRTABLE_AUTO_ENSURE_FIELDS")
+
+    voice_processor_enabled: bool = Field(default=False, alias="VOICE_PROCESSOR_ENABLED")
+    voice_processor_interval_seconds: int = Field(default=60, alias="VOICE_PROCESSOR_INTERVAL_SECONDS")
+    voice_processor_batch_size: int = Field(default=5, alias="VOICE_PROCESSOR_BATCH_SIZE")
+    voice_processor_text_model: str = Field(default="gpt-4o-mini", alias="VOICE_PROCESSOR_TEXT_MODEL")
+    voice_processor_transcription_model: str = Field(
+        default="gpt-4o-transcribe",
+        alias="VOICE_PROCESSOR_TRANSCRIPTION_MODEL",
+    )
+    voice_processor_confidence_threshold: float = Field(default=0.80, alias="VOICE_PROCESSOR_CONFIDENCE_THRESHOLD")
+    voice_processor_max_video_frames: int = Field(default=12, alias="VOICE_PROCESSOR_MAX_VIDEO_FRAMES")
+    voice_processor_video_frame_interval_seconds: int = Field(
+        default=5,
+        alias="VOICE_PROCESSOR_VIDEO_FRAME_INTERVAL_SECONDS",
+    )
+    voice_processor_create_project_items: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("VOICE_PROCESSOR_CREATE_PROJECT_ITEMS", "PROCESSOR_CREATE_PROJECT_ITEMS"),
+    )
+    voice_processor_version: str = Field(default="v1", alias="VOICE_PROCESSOR_VERSION")
+    voice_processor_stale_processing_seconds: int = Field(
+        default=900,
+        alias="VOICE_PROCESSOR_STALE_PROCESSING_SECONDS",
+    )
+    voice_processor_max_retries: int = Field(default=3, alias="VOICE_PROCESSOR_MAX_RETRIES")
+    voice_processor_retry_base_seconds: float = Field(default=1.0, alias="VOICE_PROCESSOR_RETRY_BASE_SECONDS")
+    voice_processor_max_prompt_chars: int = Field(default=24000, alias="VOICE_PROCESSOR_MAX_PROMPT_CHARS")
+    voice_processor_max_rules: int = Field(default=8, alias="VOICE_PROCESSOR_MAX_RULES")
+    voice_processor_max_file_bytes: int = Field(default=25_000_000, alias="VOICE_PROCESSOR_MAX_FILE_BYTES")
+    voice_processor_max_record_bytes: int = Field(default=50_000_000, alias="VOICE_PROCESSOR_MAX_RECORD_BYTES")
+    voice_processor_max_image_bytes: int = Field(default=4_000_000, alias="VOICE_PROCESSOR_MAX_IMAGE_BYTES")
+    voice_processor_image_max_edge: int = Field(default=1600, alias="VOICE_PROCESSOR_IMAGE_MAX_EDGE")
+    voice_processor_rules_table_id: str = Field(default="", alias="VOICE_PROCESSOR_RULES_TABLE_ID")
+    voice_processor_rules_table_name: str = Field(default="Правила обработки", alias="VOICE_PROCESSOR_RULES_TABLE_NAME")
 
     google_drive_enabled: bool = Field(default=False, alias="GOOGLE_DRIVE_ENABLED")
     google_drive_root_folder_id: str = Field(default="", alias="GOOGLE_DRIVE_ROOT_FOLDER_ID")
