@@ -11,6 +11,7 @@ import requests
 from app.config import Settings
 
 CHECKBOX_FIELD_OPTIONS = {"icon": "check", "color": "greenBright"}
+DEFAULT_SELECT_CHOICE_COLOR = "blueLight2"
 
 
 class AirtableError(RuntimeError):
@@ -590,7 +591,7 @@ class AirtableClient:
             name = str(choice or "").strip()
             if not name or name.casefold() in existing_names:
                 continue
-            next_choices.append({"name": name})
+            next_choices.append({"name": name, "color": DEFAULT_SELECT_CHOICE_COLOR})
             existing_names.add(name.casefold())
             added.append(name)
         if not added:

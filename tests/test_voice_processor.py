@@ -685,7 +685,7 @@ def test_ensure_voice_processor_schema_adds_processing_choice(tmp_path: Path) ->
     )
 
     assert added == ["Processing"]
-    assert session.patch_payloads[0]["options"]["choices"][-1] == {"name": "Processing"}
+    assert session.patch_payloads[0]["options"]["choices"][-1] == {"name": "Processing", "color": "blueLight2"}
 
 
 def test_ensure_voice_processor_schema_creates_checkbox_fields_with_options(tmp_path: Path) -> None:
