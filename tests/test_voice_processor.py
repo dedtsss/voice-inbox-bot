@@ -226,6 +226,37 @@ class MetadataPatchSession:
         return FakeAirtableResponse({"id": "fldzeZ9TidyPb1NMa"})
 
 
+class MetadataCreateSession:
+    def __init__(self) -> None:
+        self.post_payloads: list[dict[str, Any]] = []
+
+    def get(self, url: str, timeout: int = 30) -> FakeAirtableResponse:
+        return FakeAirtableResponse(
+            {
+                "tables": [
+                    {
+                        "id": "tblRMsY9zB5tnVfTR",
+                        "name": "Inbox",
+                        "fields": [
+                            {
+                                "id": "fldzeZ9TidyPb1NMa",
+                                "name": "Статус обработки",
+                                "type": "singleSelect",
+                                "options": {"choices": [{"id": "selProcessing", "name": "Processing"}]},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+    def post(self, url: str, *, json: dict[str, Any], timeout: int = 30) -> FakeAirtableResponse:
+        self.post_payloads.append(json)
+        if url.endswith("/tables"):
+            return FakeAirtableResponse({"id": "tblRules"})
+        return FakeAirtableResponse({"id": f"fldCreated{len(self.post_payloads)}"})
+
+
 class LegacyCreateSession:
     def __init__(self, *, first_error_text: str = "") -> None:
         self.first_error_text = first_error_text
@@ -655,6 +686,33 @@ def test_ensure_voice_processor_schema_adds_processing_choice(tmp_path: Path) ->
 
     assert added == ["Processing"]
     assert session.patch_payloads[0]["options"]["choices"][-1] == {"name": "Processing"}
+
+
+def test_ensure_voice_processor_schema_creates_checkbox_fields_with_options(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = MetadataCreateSession()
+    client.session = session  # type: ignore[assignment]
+
+    client.ensure_voice_processor_schema()
+
+    checkbox_payloads = [
+        payload
+        for payload in session.post_payloads
+        if payload.get("type") == "checkbox"
+        or any(field.get("type") == "checkbox" for field in payload.get("fields", []))
+    ]
+    assert {
+        payload["name"]: payload["options"]
+        for payload in checkbox_payloads
+        if payload.get("type") == "checkbox"
+    } == {
+        "Обучить на исправлении": {"icon": "check", "color": "greenBright"},
+        "Обучение учтено": {"icon": "check", "color": "greenBright"},
+    }
+    rules_table_payload = next(payload for payload in session.post_payloads if payload.get("name") == "Правила обработки")
+    active_field = next(field for field in rules_table_payload["fields"] if field["name"] == "Активно")
+    assert active_field["options"] == {"icon": "check", "color": "greenBright"}
 
 
 def test_legacy_telegram_create_typecasts_priority_normal(tmp_path: Path) -> None:

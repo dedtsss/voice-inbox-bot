@@ -10,6 +10,8 @@ import requests
 
 from app.config import Settings
 
+CHECKBOX_FIELD_OPTIONS = {"icon": "check", "color": "greenBright"}
+
 
 class AirtableError(RuntimeError):
     pass
@@ -541,9 +543,9 @@ class AirtableClient:
                     "options": {"precision": 2},
                 },
                 {"name": self.settings.voice_field_processor_version, "type": "singleLineText"},
-                {"name": self.settings.voice_field_train_on_correction, "type": "checkbox"},
+                checkbox_field(self.settings.voice_field_train_on_correction),
                 {"name": self.settings.voice_field_correction_comment, "type": "multilineText"},
-                {"name": self.settings.voice_field_training_applied, "type": "checkbox"},
+                checkbox_field(self.settings.voice_field_training_applied),
             ],
         )
         added_status_choices = self.ensure_select_field_choices(
@@ -759,10 +761,14 @@ def find_field_metadata(table: dict[str, Any], configured_field: str) -> dict[st
     return None
 
 
+def checkbox_field(name: str) -> dict[str, Any]:
+    return {"name": name, "type": "checkbox", "options": dict(CHECKBOX_FIELD_OPTIONS)}
+
+
 def processing_rule_fields(*, primary: bool) -> list[dict[str, Any]]:
     fields = [
         {"name": "Правило", "type": "singleLineText"},
-        {"name": "Активно", "type": "checkbox"},
+        checkbox_field("Активно"),
         {
             "name": "Область",
             "type": "singleSelect",
