@@ -61,7 +61,7 @@ class Settings(BaseSettings):
         default="Статус обработки",
         alias="VOICE_FIELD_PROCESSING_STATUS_QUERY_NAME",
     )
-    voice_field_attachments: str = Field(default="fld7RljviBo0ybvnP", alias="VOICE_FIELD_ATTACHMENTS")
+    voice_field_attachments: str = Field(default="Attachments", alias="VOICE_FIELD_ATTACHMENTS")
     voice_field_notes: str = Field(default="Notes", alias="VOICE_FIELD_NOTES")
     voice_field_external_id: str = Field(default="External ID", alias="VOICE_FIELD_EXTERNAL_ID")
     voice_field_external_id_query_name: str = Field(
