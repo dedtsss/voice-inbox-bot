@@ -1,8 +1,27 @@
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def parse_utc_timestamp(value: str) -> datetime:
+    text = value.strip()
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            "VOICE_PROCESSOR_CREATED_AFTER must be an ISO 8601 UTC timestamp, "
+            "for example 2026-07-19T02:00:00Z"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ValueError(
+            "VOICE_PROCESSOR_CREATED_AFTER must include UTC timezone, "
+            "for example 2026-07-19T02:00:00Z"
+        )
+    return parsed.astimezone(timezone.utc)
 
 
 class Settings(BaseSettings):
@@ -51,6 +70,7 @@ class Settings(BaseSettings):
     )
     voice_field_google_drive: str = Field(default="Google Drive", alias="VOICE_FIELD_GOOGLE_DRIVE")
     voice_field_source: str = Field(default="Источник", alias="VOICE_FIELD_SOURCE")
+    voice_field_source_query_name: str = Field(default="Источник", alias="VOICE_FIELD_SOURCE_QUERY_NAME")
     voice_field_processing_error: str = Field(default="Ошибка обработки", alias="VOICE_FIELD_PROCESSING_ERROR")
     voice_field_ai_result_json: str = Field(default="AI результат JSON", alias="VOICE_FIELD_AI_RESULT_JSON")
     voice_field_ai_confidence: str = Field(default="Уверенность AI", alias="VOICE_FIELD_AI_CONFIDENCE")
@@ -128,6 +148,8 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("VOICE_PROCESSOR_CREATE_PROJECT_ITEMS", "PROCESSOR_CREATE_PROJECT_ITEMS"),
     )
+    voice_processor_source_filter: str = Field(default="Android", alias="VOICE_PROCESSOR_SOURCE_FILTER")
+    voice_processor_created_after: str = Field(default="", alias="VOICE_PROCESSOR_CREATED_AFTER")
     voice_processor_version: str = Field(default="v1", alias="VOICE_PROCESSOR_VERSION")
     voice_processor_stale_processing_seconds: int = Field(
         default=900,
@@ -150,6 +172,19 @@ class Settings(BaseSettings):
     google_drive_token_file: str = Field(default="", alias="GOOGLE_DRIVE_TOKEN_FILE")
     google_drive_spool_dir: str = Field(default="/app/data/google_drive_spool", alias="GOOGLE_DRIVE_SPOOL_DIR")
 
+    @field_validator("voice_processor_source_filter")
+    @classmethod
+    def normalize_voice_processor_source_filter(cls, value: str) -> str:
+        return str(value or "").strip()
+
+    @field_validator("voice_processor_created_after")
+    @classmethod
+    def validate_voice_processor_created_after(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if text:
+            parse_utc_timestamp(text)
+        return text
+
     @property
     def allowed_user_ids(self) -> set[int]:
         ids: set[int] = set()
@@ -171,6 +206,12 @@ class Settings(BaseSettings):
             for part in self.mobile_inbox_allowed_mime_types.replace(";", ",").split(",")
             if part.strip()
         }
+
+    @property
+    def voice_processor_created_after_datetime(self) -> datetime | None:
+        if not self.voice_processor_created_after:
+            return None
+        return parse_utc_timestamp(self.voice_processor_created_after)
 
 
 @lru_cache(maxsize=1)

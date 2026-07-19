@@ -504,12 +504,18 @@ class VoiceInboxProcessor:
     async def run_once(self, *, batch_size: int | None = None) -> ProcessRunStats:
         stats = ProcessRunStats()
         stats.learned += await self.apply_pending_corrections()
+        effective_batch_size = batch_size or self.settings.voice_processor_batch_size
         records = await asyncio.to_thread(
             self.airtable.list_voice_records_for_processing,
-            batch_size=batch_size or self.settings.voice_processor_batch_size,
+            batch_size=effective_batch_size,
             stale_processing_seconds=self.settings.voice_processor_stale_processing_seconds,
+            source_filter=self.settings.voice_processor_source_filter,
+            created_after=self.settings.voice_processor_created_after_datetime,
         )
-        for record in records:
+        candidates = [
+            record for record in records if should_process_auto_candidate(record, self.settings)
+        ][:effective_batch_size]
+        for record in candidates:
             result = await self.process_record(record)
             if result == "processed":
                 stats.processed += 1
@@ -846,6 +852,44 @@ def should_process_record(record: dict, settings: Settings) -> bool:
     if status in (None, ""):
         return True
     return clean_string(status, "").casefold() in {"new", "processing"}
+
+
+def should_process_auto_candidate(record: dict, settings: Settings) -> bool:
+    fields = record.get("fields") or {}
+    status = get_field(
+        fields,
+        settings.voice_field_processing_status,
+        settings.voice_field_processing_status_query_name,
+        "Статус обработки",
+    )
+    if clean_string(status, "").casefold() != "new":
+        return False
+
+    source_filter = settings.voice_processor_source_filter.strip()
+    if source_filter:
+        source = get_field(fields, settings.voice_field_source, settings.voice_field_source_query_name, "Источник")
+        if clean_string(source, "").casefold() != source_filter.casefold():
+            return False
+
+    cutoff = settings.voice_processor_created_after_datetime
+    if cutoff is None:
+        return True
+    created_time = parse_airtable_created_time(record.get("createdTime"))
+    return created_time is not None and created_time > cutoff
+
+
+def parse_airtable_created_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    with contextlib.suppress(ValueError):
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(UTC)
+    return None
 
 
 def collect_record_text(record: dict, manifest: dict[str, Any], settings: Settings) -> list[str]:
