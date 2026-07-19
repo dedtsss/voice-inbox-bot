@@ -510,6 +510,9 @@ class VoiceInboxProcessor:
         return await self.process_record(record)
 
     async def process_record(self, record: dict) -> str:
+        if not should_process_record(record, self.settings):
+            logger.info("Voice processor skipped already handled record %s", record.get("id"))
+            return "skipped"
         claim = await self.claim_record(record)
         if claim is None:
             return "skipped"
@@ -812,6 +815,19 @@ def build_record_context(
         source_text = media.source_text.strip()
         parts.append("Текст записи:\n" + (source_text or "(пусто)"))
     return trim_prompt("\n\n".join(parts), settings.voice_processor_max_prompt_chars)
+
+
+def should_process_record(record: dict, settings: Settings) -> bool:
+    fields = record.get("fields") or {}
+    status = get_field(
+        fields,
+        settings.voice_field_processing_status,
+        settings.voice_field_processing_status_query_name,
+        "Статус обработки",
+    )
+    if status in (None, ""):
+        return True
+    return clean_string(status, "").casefold() in {"new", "processing"}
 
 
 def collect_record_text(record: dict, manifest: dict[str, Any], settings: Settings) -> list[str]:
