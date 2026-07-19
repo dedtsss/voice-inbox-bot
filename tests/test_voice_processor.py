@@ -1034,6 +1034,21 @@ def test_stale_processing_record_is_recovered(tmp_path: Path) -> None:
     assert airtable.records["rec1"]["fields"]["Статус обработки"] == "Processed"
 
 
+def test_explicit_record_rerun_skips_already_handled_record(tmp_path: Path) -> None:
+    record = make_record("rec1", **{"Статус обработки": "Needs Review"})
+    airtable = FakeAirtable([record])
+    ai = FakeAI([valid_ai_result()])
+    drive = FakeDriveReader()
+    processor = make_processor(tmp_path, airtable, ai, drive)
+
+    result = asyncio_run(processor.run_record("rec1"))
+
+    assert result == "skipped"
+    assert airtable.updates == []
+    assert ai.structure_calls == []
+    assert drive.calls == 0
+
+
 def test_duplicate_worker_loses_claim_and_skips(tmp_path: Path) -> None:
     airtable = ClaimLosingAirtable([make_record()])
     ai = FakeAI([valid_ai_result()])
@@ -1068,6 +1083,29 @@ def test_explicit_correction_creates_learning_rule(tmp_path: Path) -> None:
     assert '"project": "Work"' in airtable.created_rules[0]["Правильное решение"]
     assert airtable.records["rec1"]["fields"]["Обучение учтено"] is True
     assert airtable.records["rec1"]["fields"]["Обучить на исправлении"] is False
+
+
+def test_correction_learning_is_idempotent_after_applied(tmp_path: Path) -> None:
+    snapshot = json.dumps({"validated": valid_ai_result(project="Home", type="Task")}, ensure_ascii=False)
+    record = make_record(
+        "rec1",
+        **{
+            "Статус обработки": "Processed",
+            "AI результат JSON": snapshot,
+            "Обучить на исправлении": True,
+            "Обучение учтено": False,
+            "Проект": "Work",
+        },
+    )
+    airtable = FakeAirtable([record])
+    processor = make_processor(tmp_path, airtable, FakeAI([]), FakeDriveReader())
+
+    first = asyncio_run(processor.apply_correction_learning(record))
+    second = asyncio_run(processor.apply_correction_learning(airtable.fetch_voice_record("rec1")))
+
+    assert first is True
+    assert second is False
+    assert len(airtable.created_rules) == 1
 
 
 def test_unmarked_user_edit_does_not_create_rule(tmp_path: Path) -> None:
