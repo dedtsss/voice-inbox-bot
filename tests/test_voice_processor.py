@@ -1049,6 +1049,29 @@ def test_explicit_record_rerun_skips_already_handled_record(tmp_path: Path) -> N
     assert drive.calls == 0
 
 
+def test_explicit_record_skip_does_not_initialize_media_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_drive_reader(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Drive reader should not be initialized for skipped records")
+
+    def fail_ai(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("OpenAI client should not be initialized for skipped records")
+
+    monkeypatch.setattr("app.voice_processor.GoogleDriveInboxReader", fail_drive_reader)
+    monkeypatch.setattr("app.voice_processor.VoiceProcessorAI", fail_ai)
+
+    record = make_record("rec1", **{"Статус обработки": "Needs Review"})
+    airtable = FakeAirtable([record])
+    processor = VoiceInboxProcessor(make_settings(tmp_path), airtable=airtable)  # type: ignore[arg-type]
+
+    result = asyncio_run(processor.run_record("rec1"))
+
+    assert result == "skipped"
+    assert airtable.updates == []
+
+
 def test_duplicate_worker_loses_claim_and_skips(tmp_path: Path) -> None:
     airtable = ClaimLosingAirtable([make_record()])
     ai = FakeAI([valid_ai_result()])
