@@ -199,7 +199,7 @@ Processor живёт в этом же backend и использует сущес
 
 Что делает worker:
 
-1. Берёт не больше `VOICE_PROCESSOR_BATCH_SIZE` записей `Voice Inbox / Inbox` со `Статус обработки = New` или stale `Processing`.
+1. Берёт не больше `VOICE_PROCESSOR_BATCH_SIZE` записей `Voice Inbox / Inbox` со `Статус обработки = New`, `Источник = VOICE_PROCESSOR_SOURCE_FILTER` и, если задано, Airtable `createdTime > VOICE_PROCESSOR_CREATED_AFTER`.
 2. Claims запись через заранее существующий choice `Processing`, lock trace и bounded attempt count в `Ошибка обработки`.
 3. Читает Drive folder URL, `manifest.json` и потоково скачивает оригиналы во временную директорию с лимитами размера и проверкой size/SHA-256.
 4. Обрабатывает text/audio/photo/video/mixed: audio transcription, vision analysis для images, video audio + representative frames.
@@ -211,7 +211,9 @@ Processor живёт в этом же backend и использует сущес
 
 Processor не создаёт Projects OS tasks в первой версии. `VOICE_PROCESSOR_CREATE_PROJECT_ITEMS=false` оставлен как future guard; legacy alias `PROCESSOR_CREATE_PROJECT_ITEMS=false` тоже принимается.
 
-V1 processor рассчитан строго на один running worker. Текущий lock trace нужен для recovery и диагностики, но не является атомарной межпроцессной блокировкой Airtable. Не запускайте второй контейнер, `docker compose --scale`, cron-копию или ручной batch параллельно с включённым `VOICE_PROCESSOR_ENABLED=true`.
+`VOICE_PROCESSOR_SOURCE_FILTER` по умолчанию равен `Android`. `VOICE_PROCESSOR_CREATED_AFTER` необязателен, но при включении production polling его нужно выставлять в UTC ISO 8601, например `2026-07-19T02:00:00Z`, чтобы не подбирать старый backlog. Некорректный timestamp останавливает запуск.
+
+V1 processor рассчитан строго на один running worker. Текущий lock trace нужен для диагностики, но не является атомарной межпроцессной блокировкой Airtable. Не запускайте второй контейнер, `docker compose --scale`, cron-копию или ручной batch параллельно с включённым `VOICE_PROCESSOR_ENABLED=true`.
 
 ### Processor env
 
@@ -225,6 +227,8 @@ VOICE_PROCESSOR_CONFIDENCE_THRESHOLD=0.80
 VOICE_PROCESSOR_MAX_VIDEO_FRAMES=12
 VOICE_PROCESSOR_VIDEO_FRAME_INTERVAL_SECONDS=5
 VOICE_PROCESSOR_CREATE_PROJECT_ITEMS=false
+VOICE_PROCESSOR_SOURCE_FILTER=Android
+VOICE_PROCESSOR_CREATED_AFTER=
 VOICE_PROCESSOR_VERSION=v1
 VOICE_PROCESSOR_STALE_PROCESSING_SECONDS=900
 VOICE_PROCESSOR_MAX_RETRIES=3

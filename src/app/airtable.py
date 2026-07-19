@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 import time
 from typing import Any
 from urllib.parse import quote
@@ -401,19 +401,29 @@ class AirtableClient:
                 typecast=True,
             )
 
-    def list_voice_records_for_processing(self, *, batch_size: int, stale_processing_seconds: int) -> list[dict]:
+    def list_voice_records_for_processing(
+        self,
+        *,
+        batch_size: int,
+        stale_processing_seconds: int,
+        source_filter: str = "",
+        created_after: datetime | None = None,
+    ) -> list[dict]:
         limit = max(1, batch_size)
         status_field = self.settings.voice_field_processing_status_query_name or self.settings.voice_field_processing_status
-        formula = (
-            f"OR("
-            f"{{{status_field}}} = 'New',"
-            f"AND("
-            f"{{{status_field}}} = 'Processing',"
-            f"IS_BEFORE(LAST_MODIFIED_TIME({{{status_field}}}), "
-            f"DATEADD(NOW(), -{max(1, stale_processing_seconds)}, 'seconds'))"
-            f")"
-            f")"
-        )
+        formula_parts = [f"{{{status_field}}} = 'New'"]
+        normalized_source = source_filter.strip()
+        if normalized_source:
+            source_field = self.settings.voice_field_source_query_name or self.settings.voice_field_source
+            formula_parts.append(
+                f"{{{source_field}}} = '{_escape_airtable_formula_string(normalized_source)}'"
+            )
+        if created_after is not None:
+            formula_parts.append(
+                "IS_AFTER(CREATED_TIME(), "
+                f"DATETIME_PARSE('{_format_airtable_datetime(created_after)}'))"
+            )
+        formula = formula_parts[0] if len(formula_parts) == 1 else f"AND({','.join(formula_parts)})"
         return self.list_records(
             self.settings.voice_inbox_base_id,
             self.settings.voice_inbox_table_id,
@@ -803,6 +813,14 @@ def _first_line(text: str, limit: int = 90) -> str:
 
 def _is_unknown_field_error(error: AirtableError) -> bool:
     return _is_unknown_field_text(str(error))
+
+
+def _escape_airtable_formula_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _format_airtable_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _is_unknown_field_text(message: str) -> bool:

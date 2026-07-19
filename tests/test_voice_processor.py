@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from app.voice_processor import (
     allowed_context_from_metadata,
     build_airtable_update_fields,
     classify_media,
+    parse_airtable_created_time,
     validate_processor_output,
 )
 
@@ -423,12 +425,26 @@ class FakeAirtable:
         self.rule_updates: list[tuple[str, dict[str, Any]]] = []
         self.projects = [ProjectMatch("recHome", "Home"), ProjectMatch("recWork", "Work")]
 
-    def list_voice_records_for_processing(self, *, batch_size: int, stale_processing_seconds: int) -> list[dict]:
+    def list_voice_records_for_processing(
+        self,
+        *,
+        batch_size: int,
+        stale_processing_seconds: int,
+        source_filter: str = "",
+        created_after: Any = None,
+    ) -> list[dict]:
         result = []
         for record in self.records.values():
             status = record["fields"].get("Статус обработки")
-            if status == "New" or record["fields"].get("_stale_processing"):
-                result.append(record)
+            if status != "New":
+                continue
+            if source_filter and str(record["fields"].get("Источник") or "").casefold() != source_filter.casefold():
+                continue
+            if created_after is not None:
+                created_time = parse_airtable_created_time(record.get("createdTime"))
+                if created_time is None or created_time <= created_after:
+                    continue
+            result.append(record)
         return result[:batch_size]
 
     def fetch_voice_record(self, record_id: str) -> dict:
@@ -506,10 +522,11 @@ def make_record(record_id: str = "rec1", **fields: Any) -> dict[str, Any]:
         "Статус обработки": "New",
         "Исходная фраза": "Проверить счет и оплатить.",
         "Google Drive": "https://drive.google.com/drive/folders/folder1",
+        "Источник": "Android",
         "Ошибка обработки": "",
     }
     base.update(fields)
-    return {"id": record_id, "fields": base}
+    return {"id": record_id, "createdTime": "2026-07-19T10:00:00.000Z", "fields": base}
 
 
 def make_processor(
@@ -713,6 +730,26 @@ def test_airtable_processing_candidates_use_max_records_and_stop_pagination(tmp_
     assert ("maxRecords", "2") in session.requests[0]
 
 
+def test_airtable_processing_candidates_include_source_and_cutoff_filters(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    client = AirtableClient(settings)
+    session = PagingAirtableSession()
+    client.session = session  # type: ignore[assignment]
+
+    client.list_voice_records_for_processing(
+        batch_size=1,
+        stale_processing_seconds=900,
+        source_filter="Android",
+        created_after=datetime(2026, 7, 19, 10, 0, tzinfo=timezone.utc),
+    )
+
+    formula = [value for key, value in session.requests[0] if key == "filterByFormula"][0]
+    assert "{Статус обработки} = 'New'" in formula
+    assert "{Источник} = 'Android'" in formula
+    assert "IS_AFTER(CREATED_TIME(), DATETIME_PARSE('2026-07-19T10:00:00.000Z'))" in formula
+    assert "Processing" not in formula
+
+
 def test_airtable_correction_candidates_use_max_records_and_stop_pagination(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     client = AirtableClient(settings)
@@ -887,6 +924,111 @@ def test_run_once_honors_batch_size_when_more_records_exist(tmp_path: Path) -> N
     assert airtable.records["rec3"]["fields"]["Статус обработки"] == "New"
 
 
+def test_run_once_selects_new_android_record_after_cutoff(tmp_path: Path) -> None:
+    record = make_record("rec1")
+    record["createdTime"] = "2026-07-19T10:00:01.000Z"
+    airtable = FakeAirtable([record])
+    ai = FakeAI([valid_ai_result()])
+    settings = make_settings(
+        tmp_path,
+        VOICE_PROCESSOR_BATCH_SIZE=1,
+        VOICE_PROCESSOR_CREATED_AFTER="2026-07-19T10:00:00Z",
+    )
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader(), settings=settings)
+
+    stats = asyncio_run(processor.run_once())
+
+    assert stats.processed == 1
+    assert airtable.records["rec1"]["fields"]["Статус обработки"] == "Processed"
+
+
+def test_run_once_skips_android_record_before_cutoff(tmp_path: Path) -> None:
+    record = make_record("rec1")
+    record["createdTime"] = "2026-07-19T09:59:59.000Z"
+    airtable = FakeAirtable([record])
+    ai = FakeAI([valid_ai_result()])
+    settings = make_settings(tmp_path, VOICE_PROCESSOR_CREATED_AFTER="2026-07-19T10:00:00Z")
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader(), settings=settings)
+
+    stats = asyncio_run(processor.run_once())
+
+    assert stats.processed == 0
+    assert airtable.updates == []
+    assert airtable.records["rec1"]["fields"]["Статус обработки"] == "New"
+
+
+def test_run_once_skips_telegram_record(tmp_path: Path) -> None:
+    record = make_record("rec1", **{"Источник": "Telegram"})
+    airtable = FakeAirtable([record])
+    ai = FakeAI([valid_ai_result()])
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader())
+
+    stats = asyncio_run(processor.run_once())
+
+    assert stats.processed == 0
+    assert airtable.updates == []
+    assert airtable.records["rec1"]["fields"]["Статус обработки"] == "New"
+
+
+def test_run_once_skips_record_without_android_source(tmp_path: Path) -> None:
+    record = make_record("rec1", **{"Источник": ""})
+    airtable = FakeAirtable([record])
+    ai = FakeAI([valid_ai_result()])
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader())
+
+    stats = asyncio_run(processor.run_once())
+
+    assert stats.processed == 0
+    assert airtable.updates == []
+    assert airtable.records["rec1"]["fields"]["Статус обработки"] == "New"
+
+
+def test_explicit_record_ignores_automatic_source_and_cutoff_filters(tmp_path: Path) -> None:
+    record = make_record("rec1", **{"Источник": "Telegram"})
+    record["createdTime"] = "2026-07-19T09:59:59.000Z"
+    airtable = FakeAirtable([record])
+    ai = FakeAI([valid_ai_result()])
+    settings = make_settings(tmp_path, VOICE_PROCESSOR_CREATED_AFTER="2026-07-19T10:00:00Z")
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader(), settings=settings)
+
+    result = asyncio_run(processor.run_record("rec1"))
+
+    assert result == "processed"
+    assert airtable.records["rec1"]["fields"]["Статус обработки"] == "Processed"
+
+
+def test_invalid_processor_cutoff_stops_settings_validation(tmp_path: Path) -> None:
+    with pytest.raises(Exception, match="VOICE_PROCESSOR_CREATED_AFTER"):
+        make_settings(tmp_path, VOICE_PROCESSOR_CREATED_AFTER="not-a-utc-timestamp")
+
+
+def test_run_once_applies_batch_limit_after_source_and_cutoff_filtering(tmp_path: Path) -> None:
+    before = make_record("recBefore")
+    before["createdTime"] = "2026-07-19T09:59:59.000Z"
+    telegram = make_record("recTelegram", **{"Источник": "Telegram"})
+    telegram["createdTime"] = "2026-07-19T10:00:01.000Z"
+    first = make_record("recFirst")
+    first["createdTime"] = "2026-07-19T10:00:02.000Z"
+    second = make_record("recSecond")
+    second["createdTime"] = "2026-07-19T10:00:03.000Z"
+    airtable = FakeAirtable([before, telegram, first, second])
+    ai = FakeAI([valid_ai_result(), valid_ai_result()])
+    settings = make_settings(
+        tmp_path,
+        VOICE_PROCESSOR_BATCH_SIZE=1,
+        VOICE_PROCESSOR_CREATED_AFTER="2026-07-19T10:00:00Z",
+    )
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader(), settings=settings)
+
+    stats = asyncio_run(processor.run_once())
+
+    assert stats.processed == 1
+    assert airtable.records["recFirst"]["fields"]["Статус обработки"] == "Processed"
+    assert airtable.records["recSecond"]["fields"]["Статус обработки"] == "New"
+    assert airtable.records["recBefore"]["fields"]["Статус обработки"] == "New"
+    assert airtable.records["recTelegram"]["fields"]["Статус обработки"] == "New"
+
+
 def test_correction_learning_honors_batch_size(tmp_path: Path) -> None:
     snapshot = json.dumps({"validated": valid_ai_result(project="Home", type="Task")}, ensure_ascii=False)
     records = [
@@ -1022,7 +1164,7 @@ def test_processing_error_is_bounded_retry(tmp_path: Path) -> None:
     assert "attempt=1" in fields["Ошибка обработки"]
 
 
-def test_stale_processing_record_is_recovered(tmp_path: Path) -> None:
+def test_run_once_skips_processing_record(tmp_path: Path) -> None:
     record = make_record("rec1", **{"Статус обработки": "Processing", "_stale_processing": True})
     airtable = FakeAirtable([record])
     ai = FakeAI([valid_ai_result()])
@@ -1030,7 +1172,20 @@ def test_stale_processing_record_is_recovered(tmp_path: Path) -> None:
 
     stats = asyncio_run(processor.run_once())
 
-    assert stats.processed == 1
+    assert stats.processed == 0
+    assert airtable.updates == []
+    assert airtable.records["rec1"]["fields"]["Статус обработки"] == "Processing"
+
+
+def test_explicit_processing_record_is_still_processed(tmp_path: Path) -> None:
+    record = make_record("rec1", **{"Статус обработки": "Processing", "_stale_processing": True})
+    airtable = FakeAirtable([record])
+    ai = FakeAI([valid_ai_result()])
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader())
+
+    result = asyncio_run(processor.run_record("rec1"))
+
+    assert result == "processed"
     assert airtable.records["rec1"]["fields"]["Статус обработки"] == "Processed"
 
 
