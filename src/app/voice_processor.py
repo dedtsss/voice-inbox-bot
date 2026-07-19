@@ -466,9 +466,27 @@ class VoiceInboxProcessor:
     ) -> None:
         self.settings = settings
         self.airtable = airtable if airtable is not None else AirtableClient(settings)
-        self.drive_reader = drive_reader if drive_reader is not None else GoogleDriveInboxReader(settings)
-        self.ai = ai if ai is not None else VoiceProcessorAI(settings)
-        self.media_extractor = media_extractor if media_extractor is not None else MediaExtractor(settings, self.ai)
+        self._drive_reader = drive_reader
+        self._ai = ai
+        self._media_extractor = media_extractor
+
+    @property
+    def drive_reader(self) -> GoogleDriveInboxReader:
+        if self._drive_reader is None:
+            self._drive_reader = GoogleDriveInboxReader(self.settings)
+        return self._drive_reader
+
+    @property
+    def ai(self) -> VoiceProcessorAI:
+        if self._ai is None:
+            self._ai = VoiceProcessorAI(self.settings)
+        return self._ai
+
+    @property
+    def media_extractor(self) -> MediaExtractor:
+        if self._media_extractor is None:
+            self._media_extractor = MediaExtractor(self.settings, self.ai)
+        return self._media_extractor
 
     async def run_loop(self, stop_event: asyncio.Event | None = None) -> None:
         logger.info("Voice processor loop started")
