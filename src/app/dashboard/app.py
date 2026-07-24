@@ -12,7 +12,12 @@ from fastapi.templating import Jinja2Templates
 
 from app.airtable import AirtableClient, AirtableError
 from app.config import Settings, get_settings
-from app.dashboard.airtable_service import DashboardAirtableService, safe_content_disposition
+from app.dashboard.airtable_service import (
+    SORTING_MODE_PAGE_ONLY_UNSAFE,
+    DashboardAirtableService,
+    configured_sorting_mode,
+    safe_content_disposition,
+)
 from app.dashboard.security import DashboardSecurityMiddleware, csrf_input, validate_csrf_token
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,9 @@ def create_dashboard_app(
     resolved_settings = settings or get_settings()
     if len(resolved_settings.dashboard_csrf_secret.encode("utf-8")) < 32:
         raise RuntimeError("DASHBOARD_CSRF_SECRET must be configured and at least 32 bytes")
+    sorting_mode = configured_sorting_mode(resolved_settings)
+    if sorting_mode == SORTING_MODE_PAGE_ONLY_UNSAFE:
+        logger.warning("dashboard global Airtable sorting is not configured sorting_mode=%s", sorting_mode)
 
     app = FastAPI(title="Voice Inbox Dashboard", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(DashboardSecurityMiddleware, settings=resolved_settings)
@@ -40,8 +48,8 @@ def create_dashboard_app(
     )
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, bool]:
-        return {"ok": True}
+    async def healthz() -> dict[str, Any]:
+        return {"ok": True, "sorting_mode": sorting_mode}
 
     @app.get("/robots.txt", response_class=PlainTextResponse)
     async def robots() -> str:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.airtable import AirtableError, ProjectMatch
@@ -88,47 +89,66 @@ def make_record(record_id: str = "recDashboard1", **fields: Any) -> dict[str, An
     return {"id": record_id, "createdTime": created_time, "fields": defaults}
 
 
-def voice_table() -> dict[str, Any]:
+def voice_table(
+    *,
+    include_created_time: bool = False,
+    created_time_type: str = "createdTime",
+    views: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     def select(name: str, choices: list[str]) -> dict[str, Any]:
         return {"name": name, "type": "singleSelect", "options": {"choices": [{"name": choice} for choice in choices]}}
 
+    fields = [
+        {"name": "Название", "type": "singleLineText"},
+        select("Тип", ["Task", "Idea", "Note"]),
+        select("Проект", ["Home", "Work"]),
+        select("Приоритет", ["Low", "Normal", "High"]),
+        {"name": "Срок", "type": "date"},
+        {"name": "Контрагент", "type": "singleLineText"},
+        {"name": "Сумма", "type": "currency"},
+        {"name": "Период", "type": "singleLineText"},
+        {"name": "Следующее действие", "type": "multilineText"},
+        {"name": "Краткое содержание", "type": "multilineText"},
+        {"name": "Очищенный текст", "type": "multilineText"},
+        {"name": "Исходная фраза", "type": "multilineText"},
+        {"name": "Теги", "type": "multipleSelects", "options": {"choices": [{"name": "finance"}]}},
+        select("Статус обработки", ["New", "Processing", "Processed", "Needs Review"]),
+        {"name": "Attachments", "type": "multipleAttachments"},
+        {"name": "Notes", "type": "multilineText"},
+        {"name": "External ID", "type": "singleLineText"},
+        {"name": "Google Drive", "type": "url"},
+        {"name": "Источник", "type": "singleLineText"},
+        {"name": "Ошибка обработки", "type": "multilineText"},
+        {"name": "AI результат JSON", "type": "multilineText"},
+        {"name": "Уверенность AI", "type": "number"},
+        {"name": "Версия обработчика", "type": "singleLineText"},
+        {"name": "Обучить на исправлении", "type": "checkbox"},
+        {"name": "Комментарий к исправлению", "type": "multilineText"},
+        {"name": "Обучение учтено", "type": "checkbox"},
+    ]
+    if include_created_time:
+        field: dict[str, Any] = {"name": "Dashboard Created Time", "type": created_time_type}
+        if created_time_type == "formula":
+            field["options"] = {"formula": "CREATED_TIME()", "result": {"type": "date"}}
+        fields.append(field)
     return {
         "id": "tblInbox",
         "name": "Inbox",
-        "fields": [
-            {"name": "Название", "type": "singleLineText"},
-            select("Тип", ["Task", "Idea", "Note"]),
-            select("Проект", ["Home", "Work"]),
-            select("Приоритет", ["Low", "Normal", "High"]),
-            {"name": "Срок", "type": "date"},
-            {"name": "Контрагент", "type": "singleLineText"},
-            {"name": "Сумма", "type": "currency"},
-            {"name": "Период", "type": "singleLineText"},
-            {"name": "Следующее действие", "type": "multilineText"},
-            {"name": "Краткое содержание", "type": "multilineText"},
-            {"name": "Очищенный текст", "type": "multilineText"},
-            {"name": "Исходная фраза", "type": "multilineText"},
-            {"name": "Теги", "type": "multipleSelects", "options": {"choices": [{"name": "finance"}]}},
-            select("Статус обработки", ["New", "Processing", "Processed", "Needs Review"]),
-            {"name": "Attachments", "type": "multipleAttachments"},
-            {"name": "Notes", "type": "multilineText"},
-            {"name": "External ID", "type": "singleLineText"},
-            {"name": "Google Drive", "type": "url"},
-            {"name": "Источник", "type": "singleLineText"},
-            {"name": "Ошибка обработки", "type": "multilineText"},
-            {"name": "AI результат JSON", "type": "multilineText"},
-            {"name": "Уверенность AI", "type": "number"},
-            {"name": "Версия обработчика", "type": "singleLineText"},
-            {"name": "Обучить на исправлении", "type": "checkbox"},
-            {"name": "Комментарий к исправлению", "type": "multilineText"},
-            {"name": "Обучение учтено", "type": "checkbox"},
-        ],
+        "fields": fields,
+        "views": views if views is not None else [{"name": "Grid view", "type": "grid"}],
     }
 
 
 class FakeAirtable:
-    def __init__(self, records: list[dict[str, Any]] | None = None, *, raise_on_page: bool = False) -> None:
+    def __init__(
+        self,
+        records: list[dict[str, Any]] | None = None,
+        *,
+        table: dict[str, Any] | None = None,
+        raise_on_page: bool = False,
+    ) -> None:
         self.records = {record["id"]: record for record in (records if records is not None else [make_record()])}
+        self.table = table or voice_table()
         self.raise_on_page = raise_on_page
         self.page_calls: list[dict[str, Any]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
@@ -153,7 +173,7 @@ class FakeAirtable:
                 "name": "Правила обработки",
                 "fields": [{"name": "Правило", "type": "singleLineText"}, {"name": "Активно", "type": "checkbox"}],
             }
-        return voice_table()
+        return self.table
 
     def list_projects(self) -> list[ProjectMatch]:
         return [ProjectMatch(record_id="recHome", title="Home"), ProjectMatch(record_id="recWork", title="Work")]
@@ -170,14 +190,61 @@ class FakeAirtable:
     ) -> dict[str, Any]:
         self.page_calls.append({"params": list(params or []), "page_size": page_size, "offset": offset})
         if self.raise_on_page:
-            raise AirtableError("fake airtable outage")
-        records = list(self.records.values())
+            raise AirtableError("fake airtable outage fake-user-text https://example.invalid/private-attachment")
+        params_dict = dict(params or [])
+        view = params_dict.get("view")
+        if view and view not in {view_item.get("name") for view_item in self.table.get("views") or []}:
+            raise AirtableError("fake missing view")
+        records = self._filtered_records(params_dict.get("filterByFormula", ""))
+        records = self._sorted_records(records, params or [])
         if offset:
             return {"records": records[page_size : page_size * 2]}
         payload: dict[str, Any] = {"records": records[:page_size]}
         if len(records) > page_size:
             payload["offset"] = "itrNEXT"
         return payload
+
+    def _filtered_records(self, formula: str) -> list[dict[str, Any]]:
+        records = list(self.records.values())
+        equals = re.findall(r"\{([^}]+)\} = '([^']*)'", formula)
+        for field_name, value in equals:
+            if "OR(" in formula and field_name == "Статус обработки" and value in {"New", "Processing"}:
+                continue
+            records = [record for record in records if str(record.get("fields", {}).get(field_name) or "") == value]
+        if "OR({Статус обработки} = 'New',{Статус обработки} = 'Processing')" in formula:
+            records = [
+                record
+                for record in records
+                if str(record.get("fields", {}).get("Статус обработки") or "") in {"New", "Processing"}
+            ]
+        match = re.search(r"SEARCH\('([^']+)'", formula)
+        if match:
+            needle = match.group(1).casefold()
+            searchable = ("Название", "Исходная фраза", "Очищенный текст", "Краткое содержание", "Следующее действие", "External ID", "Notes")
+            records = [
+                record
+                for record in records
+                if any(needle in str(record.get("fields", {}).get(field) or "").casefold() for field in searchable)
+            ]
+        return records
+
+    def _sorted_records(self, records: list[dict[str, Any]], params: list[tuple[str, str]] | None) -> list[dict[str, Any]]:
+        params_dict = dict(params or [])
+        sort_fields: list[tuple[str, str]] = []
+        for index in range(3):
+            field_name = params_dict.get(f"sort[{index}][field]")
+            if field_name:
+                sort_fields.append((field_name, params_dict.get(f"sort[{index}][direction]", "asc")))
+        sorted_records = list(records)
+        for field_name, direction in reversed(sort_fields):
+            reverse = direction == "desc"
+            sorted_records.sort(key=lambda record: self._sort_value(record, field_name), reverse=reverse)
+        return sorted_records
+
+    def _sort_value(self, record: dict[str, Any], field_name: str) -> Any:
+        if field_name == "Dashboard Created Time":
+            return record.get("createdTime") or ""
+        return record.get("fields", {}).get(field_name) or ""
 
     def fetch_voice_record(self, record_id: str) -> dict[str, Any]:
         return self.records[record_id]
@@ -200,9 +267,9 @@ class FakeAirtable:
         return {"id": record_id, "fields": fields}
 
 
-def make_client(fake: FakeAirtable | None = None) -> tuple[TestClient, FakeAirtable]:
+def make_client(fake: FakeAirtable | None = None, **settings_overrides: Any) -> tuple[TestClient, FakeAirtable]:
     airtable = fake or FakeAirtable()
-    app = create_dashboard_app(make_settings(), airtable)  # type: ignore[arg-type]
+    app = create_dashboard_app(make_settings(**settings_overrides), airtable)  # type: ignore[arg-type]
     return TestClient(app), airtable
 
 
@@ -218,7 +285,7 @@ def test_health_endpoint_and_security_headers() -> None:
     response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    assert response.json() == {"ok": True, "sorting_mode": "page_only_unsafe"}
     assert response.headers["cache-control"] == "no-store"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert response.headers["x-robots-tag"] == "noindex, nofollow"
@@ -268,7 +335,7 @@ def test_pagination_uses_airtable_offset() -> None:
     records = [make_record(f"recDashboard{i}") for i in range(12)]
     client, airtable = make_client(FakeAirtable(records=records))
 
-    response = client.get("/records?page_size=10&q=abc")
+    response = client.get("/records?page_size=10&q=dashboard")
 
     assert response.status_code == 200
     assert "offset=itrNEXT" in response.text
@@ -276,8 +343,82 @@ def test_pagination_uses_airtable_offset() -> None:
     assert airtable.page_calls[-1]["offset"] == ""
 
 
+def test_dashboard_airtable_view_is_used_with_priority() -> None:
+    table = voice_table(include_created_time=True, views=[{"name": "Dashboard Latest", "type": "grid"}])
+    client, airtable = make_client(
+        FakeAirtable(table=table),
+        DASHBOARD_AIRTABLE_VIEW="Dashboard Latest",
+        DASHBOARD_CREATED_TIME_FIELD="Dashboard Created Time",
+    )
+
+    response = client.get("/records?sort=asc")
+
+    assert response.status_code == 200
+    params = dict(airtable.page_calls[-1]["params"])
+    assert params["view"] == "Dashboard Latest"
+    assert "sort[0][field]" not in params
+    assert 'option value="desc" selected' in response.text
+    assert client.get("/healthz").json()["sorting_mode"] == "airtable_view"
+
+
+@pytest.mark.parametrize("created_time_type", ["createdTime", "formula"])
+def test_created_time_field_adds_desc_server_sort_and_stable_secondary_sort(created_time_type: str) -> None:
+    table = voice_table(include_created_time=True, created_time_type=created_time_type)
+    client, airtable = make_client(FakeAirtable(table=table), DASHBOARD_CREATED_TIME_FIELD="Dashboard Created Time")
+
+    response = client.get("/records?sort=private-user-field")
+
+    assert response.status_code == 200
+    params = dict(airtable.page_calls[-1]["params"])
+    assert params["sort[0][field]"] == "Dashboard Created Time"
+    assert params["sort[0][direction]"] == "desc"
+    assert params["sort[1][field]"] == "External ID"
+    assert params["sort[1][direction]"] == "asc"
+    assert "private-user-field" not in {value for key, value in params.items() if key.startswith("sort")}
+    assert "Сортировка по времени применяется к текущей странице" not in response.text
+
+
+def test_created_time_sort_is_global_across_first_and_second_page() -> None:
+    table = voice_table(include_created_time=True)
+    records = [
+        make_record("recOldest111", createdTime="2026-07-19T10:00:00.000Z", **{"External ID": "d"}),
+        make_record("recOlder222", createdTime="2026-07-19T10:05:00.000Z", **{"External ID": "c"}),
+        make_record("recNewest333", createdTime="2026-07-19T10:20:00.000Z", **{"External ID": "a"}),
+        make_record("recMiddle444", createdTime="2026-07-19T10:10:00.000Z", **{"External ID": "b"}),
+    ]
+    service = DashboardAirtableService(
+        make_settings(DASHBOARD_CREATED_TIME_FIELD="Dashboard Created Time"),
+        FakeAirtable(records=records, table=table),  # type: ignore[arg-type]
+    )
+
+    first = service.list_records({"page_size": "2"})
+    second = service.list_records({"page_size": "2", "offset": first["next_offset"]})
+
+    assert [record["id"] for record in first["records"]] == ["recNewest333", "recMiddle444"]
+    assert [record["id"] for record in second["records"]] == ["recOlder222", "recOldest111"]
+    assert first["created_sort_is_exact"] is True
+    assert first["sorting_mode"] == "airtable_field"
+
+
+def test_created_time_sort_uses_secondary_field_for_stable_ties() -> None:
+    table = voice_table(include_created_time=True)
+    records = [
+        make_record("recTieB2222", createdTime="2026-07-19T10:00:00.000Z", **{"External ID": "b"}),
+        make_record("recTieA1111", createdTime="2026-07-19T10:00:00.000Z", **{"External ID": "a"}),
+    ]
+    service = DashboardAirtableService(
+        make_settings(DASHBOARD_CREATED_TIME_FIELD="Dashboard Created Time"),
+        FakeAirtable(records=records, table=table),  # type: ignore[arg-type]
+    )
+
+    data = service.list_records({})
+
+    assert [record["id"] for record in data["records"]] == ["recTieA1111", "recTieB2222"]
+
+
 def test_filters_and_search_build_airtable_formula() -> None:
-    client, airtable = make_client()
+    table = voice_table(include_created_time=True)
+    client, airtable = make_client(FakeAirtable(table=table), DASHBOARD_CREATED_TIME_FIELD="Dashboard Created Time")
 
     response = client.get("/records?q=invoice&status=New&source=Android&project=Home&entry_type=Task&period=7d")
 
@@ -289,6 +430,111 @@ def test_filters_and_search_build_airtable_formula() -> None:
     assert "{Тип} = 'Task'" in formula
     assert "SEARCH('invoice'" in formula
     assert "CREATED_TIME()" in formula
+    params = dict(airtable.page_calls[-1]["params"])
+    assert params["sort[0][field]"] == "Dashboard Created Time"
+    assert params["sort[0][direction]"] == "desc"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_formula"),
+    [
+        ("/records?status=New", "{Статус обработки} = 'New'"),
+        ("/needs-review", "{Статус обработки} = 'Needs Review'"),
+        ("/processed", "{Статус обработки} = 'Processed'"),
+        ("/queue", "OR({Статус обработки} = 'New',{Статус обработки} = 'Processing')"),
+        ("/technical", "SEARCH('smoke'"),
+        ("/records?q=invoice", "SEARCH('invoice'"),
+    ],
+)
+def test_server_sort_is_preserved_for_sections_filters_and_search(path: str, expected_formula: str) -> None:
+    table = voice_table(include_created_time=True)
+    records = [
+        make_record("recFiltered1", createdTime="2026-07-19T10:00:00.000Z", **{"Статус обработки": "New", "Название": "invoice"}),
+        make_record("recFiltered2", createdTime="2026-07-19T10:01:00.000Z", **{"Статус обработки": "Processing", "Название": "invoice"}),
+        make_record("recFiltered3", createdTime="2026-07-19T10:02:00.000Z", **{"Статус обработки": "Processed", "Название": "invoice"}),
+        make_record("recFiltered4", createdTime="2026-07-19T10:03:00.000Z", **{"Статус обработки": "Needs Review", "Название": "invoice"}),
+    ]
+    client, airtable = make_client(
+        FakeAirtable(records=records, table=table),
+        DASHBOARD_CREATED_TIME_FIELD="Dashboard Created Time",
+    )
+
+    response = client.get(path)
+
+    assert response.status_code == 200
+    params = dict(airtable.page_calls[-1]["params"])
+    assert expected_formula in params["filterByFormula"]
+    assert params["sort[0][field]"] == "Dashboard Created Time"
+    assert params["sort[0][direction]"] == "desc"
+
+
+def test_missing_sort_config_is_explicit_page_only_limited_mode() -> None:
+    records = [
+        make_record("recOldPage11", createdTime="2026-07-19T10:00:00.000Z"),
+        make_record("recOldPage12", createdTime="2026-07-19T10:01:00.000Z"),
+        make_record("recNewest22", createdTime="2026-07-19T10:20:00.000Z"),
+    ]
+    service = DashboardAirtableService(make_settings(), FakeAirtable(records=records))  # type: ignore[arg-type]
+
+    data = service.list_records({"page_size": "2"})
+
+    assert [record["id"] for record in data["records"]] == ["recOldPage12", "recOldPage11"]
+    assert "recNewest22" not in [record["id"] for record in data["records"]]
+    assert data["created_sort_is_exact"] is False
+    assert data["sorting_mode"] == "page_only_unsafe"
+
+
+def test_missing_sort_config_logs_safe_startup_warning(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
+
+    make_client()
+
+    log_text = caplog.text
+    assert "sorting_mode=page_only_unsafe" in log_text
+    assert "pat-" not in log_text
+    assert "sk-" not in log_text
+    assert "raw text" not in log_text
+
+
+def test_missing_airtable_view_is_reported_without_page_only_fallback() -> None:
+    client, airtable = make_client(FakeAirtable(table=voice_table(views=[])), DASHBOARD_AIRTABLE_VIEW="Missing View")
+
+    response = client.get("/records")
+
+    assert response.status_code == 502
+    assert airtable.page_calls == []
+    assert "Missing View" not in response.text
+
+
+def test_missing_created_time_field_is_reported_without_page_only_fallback() -> None:
+    client, airtable = make_client(DASHBOARD_CREATED_TIME_FIELD="Missing Created Time")
+
+    response = client.get("/records")
+
+    assert response.status_code == 502
+    assert airtable.page_calls == []
+    assert "Missing Created Time" not in response.text
+
+
+def test_created_time_field_must_have_created_time_type() -> None:
+    table = voice_table(include_created_time=True, created_time_type="singleLineText")
+    client, airtable = make_client(FakeAirtable(table=table), DASHBOARD_CREATED_TIME_FIELD="Dashboard Created Time")
+
+    response = client.get("/records")
+
+    assert response.status_code == 502
+    assert airtable.page_calls == []
+
+
+def test_airtable_error_logging_does_not_include_user_text_or_attachment_url(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
+    client, _ = make_client(FakeAirtable(raise_on_page=True))
+
+    response = client.get("/records")
+
+    assert response.status_code == 502
+    assert "fake-user-text" not in caplog.text
+    assert "example.invalid/private-attachment" not in caplog.text
 
 
 def test_stale_queue_records_are_marked() -> None:
