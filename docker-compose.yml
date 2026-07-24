@@ -13,11 +13,13 @@ services:
 
   voice-inbox-dashboard:
     build: .
+    command: ["python", "-m", "app.dashboard"]
     container_name: voice-inbox-dashboard
     restart: unless-stopped
     env_file:
       - .env
     environment:
+      VOICE_PROCESSOR_ENABLED: "false"
       DASHBOARD_HOST: 0.0.0.0
       DASHBOARD_PORT: 8081
       DASHBOARD_ALLOWED_HOSTS: ${DASHBOARD_ALLOWED_HOSTS:-127.0.0.1,localhost}
