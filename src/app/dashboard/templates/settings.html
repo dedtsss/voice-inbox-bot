@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% block title %}Настройки dashboard{% endblock %}
+{% block content %}
+  <section class="page-hero compact">
+    <div>
+      <span class="eyebrow">{{ icons.icon("settings") }}Settings</span>
+      <h1>Настройки</h1>
+      <p class="muted">Безопасная сводка конфигурации dashboard без токенов, base id и секретов.</p>
+    </div>
+  </section>
+
+  <section class="dashboard-grid">
+    <article class="panel span-6">
+      <div class="panel-head"><h2>Runtime</h2></div>
+      <dl class="field-list dense">
+        <div><dt>Timezone</dt><dd>{{ data.timezone }}</dd></div>
+        <div><dt>Page size</dt><dd>{{ data.page_size }}</dd></div>
+        <div><dt>Overview max records</dt><dd>{{ data.overview_max_records }}</dd></div>
+        <div><dt>Sorting mode</dt><dd>{{ data.sorting_mode }}</dd></div>
+        <div><dt>Attachment timeout</dt><dd>{{ data.attachment_timeout_seconds }} сек</dd></div>
+      </dl>
+    </article>
+
+    <article class="panel span-6">
+      <div class="panel-head"><h2>Security</h2></div>
+      <dl class="field-list dense">
+        <div><dt>Allowed hosts</dt><dd>{{ data.allowed_hosts|join(", ") }}</dd></div>
+        <div><dt>Public origin</dt><dd>{{ "Настроен" if data.public_origin_configured else "Не настроен" }}</dd></div>
+        <div><dt>Write rate limit</dt><dd>{{ data.write_rate_limit_per_minute }} / мин</dd></div>
+        <div><dt>Max form bytes</dt><dd>{{ data.max_form_bytes }}</dd></div>
+        <div><dt>Cloudflare Access</dt><dd>{{ "Ожидается перед dashboard" if data.cloudflare_access_expected else "—" }}</dd></div>
+      </dl>
+    </article>
+
+    <article class="panel span-12">
+      <div class="panel-head">
+        <div>
+          <h2>Editable allowlist</h2>
+          <p class="muted">Только эти ключи принимаются из форм сохранения.</p>
+        </div>
+      </div>
+      <div class="tag-list">
+        {% for key in data.editable_keys %}
+          <span class="tag">{{ key }}</span>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+{% endblock %}

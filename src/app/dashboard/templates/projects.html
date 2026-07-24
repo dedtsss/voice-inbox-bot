@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% import "partials/record_macros.html" as records %}
+{% block title %}Проекты{% endblock %}
+{% block content %}
+  <section class="page-hero compact">
+    <div>
+      <span class="eyebrow">{{ icons.icon("projects") }}Projects</span>
+      <h1>Проекты</h1>
+      <p class="muted">Проектный разрез входящих записей. Полная проектная логика остается в Airtable/Projects OS.</p>
+    </div>
+  </section>
+
+  <section class="project-grid">
+    {% for project in data.projects %}
+      <a class="project-card" href="/records?project={{ project.title }}">
+        <span class="record-type-icon">{{ icons.icon("projects") }}</span>
+        <strong>{{ project.title }}</strong>
+        <small>{{ project.count }} записей в выборке</small>
+      </a>
+    {% else %}
+      {% for project, count in data.project_counts %}
+        <a class="project-card" href="/records?project={{ project }}">
+          <span class="record-type-icon">{{ icons.icon("projects") }}</span>
+          <strong>{{ project }}</strong>
+          <small>{{ count }} записей в выборке</small>
+        </a>
+      {% else %}
+        <div class="empty-state">
+          {{ icons.icon("projects") }}
+          <strong>Проекты пока не найдены.</strong>
+        </div>
+      {% endfor %}
+    {% endfor %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Последние записи по проектам</h2>
+        <p class="muted">Быстрый доступ к свежим входящим.</p>
+      </div>
+    </div>
+    <div class="mini-record-list">
+      {% for record in data.recent_records %}
+        {{ records.mini_record(record) }}
+      {% else %}
+        <p class="empty">Записей пока нет.</p>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

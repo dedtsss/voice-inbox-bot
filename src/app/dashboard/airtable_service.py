@@ -4,6 +4,7 @@ import contextlib
 import json
 import mimetypes
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -152,18 +153,38 @@ class DashboardAirtableService:
             "last7": 0,
             "Android": 0,
             "Telegram": 0,
+            "Web": 0,
             "stale": 0,
+            "errors": 0,
+            "training_requested": 0,
+            "training_pending": 0,
+            "training_applied": 0,
+            "rules_total": 0,
+            "rules_active": 0,
+            "ai_confidence_avg": None,
         }
         technical = 0
+        status_counts: Counter[str] = Counter()
+        source_counts: Counter[str] = Counter()
+        project_counts: Counter[str] = Counter()
+        type_counts: Counter[str] = Counter()
+        priority_counts: Counter[str] = Counter()
+        confidence_values: list[float] = []
+        normalized_records: list[dict[str, Any]] = []
         for record in records:
             item = normalize_record(record, bindings, self.settings)
+            normalized_records.append(item)
             status = item["status"]
+            status_counts[status or "Без статуса"] += 1
             if status in {"New", "Processing", "Processed", "Needs Review"}:
                 cards[status] += 1
-            if item["source"] == "Android":
-                cards["Android"] += 1
-            elif item["source"] == "Telegram":
-                cards["Telegram"] += 1
+            source = item["source"] or "Без источника"
+            source_counts[source] += 1
+            if source in cards:
+                cards[source] += 1
+            project_counts[item.get("project") or "Без проекта"] += 1
+            type_counts[item.get("entry_type") or "Без типа"] += 1
+            priority_counts[item.get("priority") or "Без приоритета"] += 1
             created_at = item["created_at"]
             if created_at and created_at >= today_start:
                 cards["today"] += 1
@@ -173,9 +194,41 @@ class DashboardAirtableService:
                 cards["stale"] += 1
             if is_technical_record(item):
                 technical += 1
+            if item.get("processing_error"):
+                cards["errors"] += 1
+            train_requested = truthy_value(item.get("train_on_correction"))
+            train_applied = truthy_value(item.get("training_applied"))
+            if train_requested:
+                cards["training_requested"] += 1
+            if train_requested and not train_applied:
+                cards["training_pending"] += 1
+            if train_applied:
+                cards["training_applied"] += 1
+            with contextlib.suppress(TypeError, ValueError):
+                confidence = float(item.get("ai_confidence"))
+                if 1 < confidence <= 100:
+                    confidence = confidence / 100
+                if 0 <= confidence <= 1:
+                    confidence_values.append(confidence)
+        rules = self.safe_list_rules()
+        cards["rules_total"] = len(rules)
+        cards["rules_active"] = sum(1 for rule in rules if normalize_rule(rule)["active"])
+        if confidence_values:
+            cards["ai_confidence_avg"] = round(sum(confidence_values) / len(confidence_values), 2)
+        recent_records = sorted(
+            normalized_records,
+            key=lambda item: item["created_at"] or datetime.min.replace(tzinfo=UTC),
+            reverse=True,
+        )[:8]
         return {
             "cards": cards,
             "technical": technical,
+            "status_counts": count_items(status_counts),
+            "source_counts": count_items(source_counts),
+            "project_counts": count_items(project_counts),
+            "type_counts": count_items(type_counts),
+            "priority_counts": count_items(priority_counts),
+            "recent_records": recent_records,
             "timezone": self.settings.timezone,
             "max_records": self.settings.dashboard_overview_max_records,
         }
@@ -202,6 +255,7 @@ class DashboardAirtableService:
             "records": records,
             "next_offset": payload.get("offset") or "",
             "next_query": next_query(query, str(payload.get("offset") or "")),
+            "view_query": view_query(query),
             "page_size": page_size,
             "sort": sorting.direction,
             "filters": query,
@@ -209,6 +263,73 @@ class DashboardAirtableService:
             "created_sort_is_exact": sorting.is_exact,
             "sorting_mode": sorting.mode,
         }
+
+    def kanban(self, query: dict[str, str]) -> dict[str, Any]:
+        kanban_query = dict(query)
+        kanban_query.setdefault("page_size", "50")
+        data = self.list_records(kanban_query)
+        columns = [
+            {
+                "key": "new",
+                "title": "Новые",
+                "status": "New",
+                "hint": "Свежие входящие, которые processor еще не забрал.",
+                "records": [],
+            },
+            {
+                "key": "processing",
+                "title": "В обработке",
+                "status": "Processing",
+                "hint": "Записи, занятые processor или ожидающие завершения.",
+                "records": [],
+            },
+            {
+                "key": "review",
+                "title": "Нужна проверка",
+                "status": "Needs Review",
+                "hint": "Низкая уверенность, ошибки или ручная проверка.",
+                "records": [],
+            },
+            {
+                "key": "done",
+                "title": "Готово",
+                "status": "Processed",
+                "hint": "Обработано и готово к использованию.",
+                "records": [],
+            },
+            {
+                "key": "training",
+                "title": "Обучение",
+                "status": "",
+                "hint": "Исправления, ожидающие учета processor.",
+                "records": [],
+            },
+        ]
+        by_key = {column["key"]: column for column in columns}
+        for record in data["records"]:
+            if truthy_value(record.get("train_on_correction")) and not truthy_value(record.get("training_applied")):
+                by_key["training"]["records"].append(record)
+                continue
+            status = record.get("status")
+            if status == "Processing":
+                by_key["processing"]["records"].append(record)
+            elif status == "Needs Review":
+                by_key["review"]["records"].append(record)
+            elif status == "Processed":
+                by_key["done"]["records"].append(record)
+            else:
+                by_key["new"]["records"].append(record)
+        data["columns"] = columns
+        return data
+
+    def review_records(self, query: dict[str, str]) -> dict[str, Any]:
+        review_query = dict(query)
+        review_query["status"] = "Needs Review"
+        data = self.list_records(review_query)
+        metadata = self.metadata()
+        for record in data["records"]:
+            record["editable_fields"] = editable_fields(record, metadata)
+        return data
 
     def fetch_record(self, record_id: str) -> dict[str, Any]:
         ensure_record_id(record_id)
@@ -249,6 +370,88 @@ class DashboardAirtableService:
             "rules": [normalize_rule(rule) for rule in rules],
             "active_supported": rules_active_supported(metadata.get("rules_table")),
         }
+
+    def learning_dashboard(self) -> dict[str, Any]:
+        rules_data = self.list_rules()
+        overview = self.overview()
+        recent_cases = [
+            record
+            for record in overview["recent_records"]
+            if truthy_value(record.get("train_on_correction"))
+            or truthy_value(record.get("training_applied"))
+            or record.get("correction_comment")
+        ][:6]
+        return {
+            "rules": rules_data["rules"],
+            "active_supported": rules_data["active_supported"],
+            "cards": overview["cards"],
+            "recent_cases": recent_cases,
+            "project_counts": overview["project_counts"],
+            "type_counts": overview["type_counts"],
+        }
+
+    def projects_dashboard(self) -> dict[str, Any]:
+        metadata = self.metadata()
+        overview = self.overview()
+        project_counts = dict(overview["project_counts"])
+        projects = [
+            {
+                "title": project.title,
+                "record_id": project.record_id,
+                "count": project_counts.get(project.title, 0),
+            }
+            for project in metadata["allowed"].projects
+        ]
+        return {
+            "projects": projects,
+            "project_counts": overview["project_counts"],
+            "recent_records": overview["recent_records"],
+        }
+
+    def sources_dashboard(self) -> dict[str, Any]:
+        overview = self.overview()
+        source_cards = []
+        for source, count in overview["source_counts"]:
+            source_cards.append(
+                {
+                    "name": source,
+                    "count": count,
+                    "records": [
+                        record
+                        for record in overview["recent_records"]
+                        if (record.get("source") or "Без источника") == source
+                    ][:4],
+                }
+            )
+        return {
+            "cards": overview["cards"],
+            "source_cards": source_cards,
+            "source_counts": overview["source_counts"],
+            "status_counts": overview["status_counts"],
+        }
+
+    def analytics_dashboard(self) -> dict[str, Any]:
+        return self.overview()
+
+    def settings_dashboard(self) -> dict[str, Any]:
+        return {
+            "timezone": self.settings.timezone,
+            "page_size": self.settings.dashboard_page_size,
+            "overview_max_records": self.settings.dashboard_overview_max_records,
+            "sorting_mode": configured_sorting_mode(self.settings),
+            "attachment_timeout_seconds": self.settings.dashboard_attachment_timeout_seconds,
+            "write_rate_limit_per_minute": self.settings.dashboard_write_rate_limit_per_minute,
+            "max_form_bytes": self.settings.dashboard_max_form_bytes,
+            "allowed_hosts": sorted(self.settings.dashboard_allowed_host_set),
+            "public_origin_configured": bool(self.settings.dashboard_public_origin.strip()),
+            "cloudflare_access_expected": True,
+            "editable_keys": EDITABLE_KEYS,
+        }
+
+    def safe_list_rules(self) -> list[dict[str, Any]]:
+        with contextlib.suppress(AirtableError):
+            return self.airtable.list_processing_rules(active_only=False, page_size=100)
+        return []
 
     def update_rule_active(self, record_id: str, active: bool) -> None:
         ensure_record_id(record_id)
@@ -360,6 +563,7 @@ def normalize_record(record: dict[str, Any], bindings: dict[str, FieldBinding], 
     item["age_state"] = age_state(item["status"], item["age_minutes"])
     item["is_stale"] = item["age_state"] == "stale"
     item["is_technical"] = is_technical_record(item)
+    item["ai_confidence_percent"] = ai_confidence_percent(item.get("ai_confidence"))
     return item
 
 
@@ -833,6 +1037,31 @@ def next_query(query: dict[str, str], offset: str) -> str:
     cleaned = {key: value for key, value in query.items() if key != "offset" and value}
     cleaned["offset"] = offset
     return urlencode(cleaned)
+
+
+def view_query(query: dict[str, str]) -> str:
+    return urlencode({key: value for key, value in query.items() if key != "offset" and value})
+
+
+def count_items(counter: Counter[str], *, limit: int = 8) -> list[tuple[str, int]]:
+    return sorted(counter.items(), key=lambda item: (-item[1], item[0].casefold()))[:limit]
+
+
+def truthy_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "y", "on", "да"}
+
+
+def ai_confidence_percent(value: Any) -> int | None:
+    with contextlib.suppress(TypeError, ValueError):
+        confidence = float(value)
+        if confidence <= 1:
+            confidence *= 100
+        return max(0, min(100, round(confidence)))
+    return None
 
 
 def ensure_record_id(record_id: str) -> None:

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% import "partials/record_macros.html" as records %}
+{% block title %}Источники{% endblock %}
+{% block content %}
+  <section class="page-hero compact">
+    <div>
+      <span class="eyebrow">{{ icons.icon("sources") }}Sources</span>
+      <h1>Источники</h1>
+      <p class="muted">Каналы, из которых приходят записи Voice Inbox.</p>
+    </div>
+  </section>
+
+  <section class="metric-grid">
+    <a class="metric accent-green" href="/records?source=Android">
+      <span class="metric-label">Android</span>
+      <strong>{{ data.cards.Android }}</strong>
+      <small>Mobile Inbox API</small>
+    </a>
+    <a class="metric accent-blue" href="/records?source=Telegram">
+      <span class="metric-label">Telegram</span>
+      <strong>{{ data.cards.Telegram }}</strong>
+      <small>Bot input</small>
+    </a>
+    <a class="metric" href="/records?source=Web">
+      <span class="metric-label">Web</span>
+      <strong>{{ data.cards.Web }}</strong>
+      <small>Если источник есть в Airtable</small>
+    </a>
+    <a class="metric urgent" href="/needs-review">
+      <span class="metric-label">Needs Review</span>
+      <strong>{{ data.cards["Needs Review"] }}</strong>
+      <small>По всем источникам</small>
+    </a>
+  </section>
+
+  <section class="source-grid">
+    {% for source in data.source_cards %}
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>{{ source.name }}</h2>
+            <p class="muted">{{ source.count }} записей в текущей выборке.</p>
+          </div>
+          <a class="icon-link" href="/records?source={{ source.name }}">{{ icons.icon("arrow") }}<span>Открыть</span></a>
+        </div>
+        <div class="mini-record-list">
+          {% for record in source.records %}
+            {{ records.mini_record(record) }}
+          {% else %}
+            <p class="empty">Нет свежих событий для этого источника.</p>
+          {% endfor %}
+        </div>
+      </article>
+    {% else %}
+      <div class="empty-state">
+        {{ icons.icon("sources") }}
+        <strong>Источники пока не найдены.</strong>
+      </div>
+    {% endfor %}
+  </section>
+{% endblock %}

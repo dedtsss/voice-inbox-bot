@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% import "partials/record_macros.html" as records %}
+{% block title %}Канбан Voice Inbox{% endblock %}
+{% block content %}
+  <section class="page-hero compact">
+    <div>
+      <span class="eyebrow">{{ icons.icon("kanban") }}Kanban</span>
+      <h1>Канбан входящих</h1>
+      <p class="muted">Карточки связаны с реальными Airtable-записями. Перемещение drag-and-drop не включено, чтобы не менять production-статусы случайным жестом.</p>
+    </div>
+  </section>
+
+  {% include "partials/filters.html" %}
+
+  <section class="kanban-board" aria-label="Канбан записей Voice Inbox">
+    {% for column in data.columns %}
+      <article class="kanban-column">
+        <header class="kanban-column-head">
+          <div>
+            <h2>{{ column.title }}</h2>
+            <p>{{ column.hint }}</p>
+          </div>
+          <span class="count-badge">{{ column.records|length }}</span>
+        </header>
+        <div class="kanban-stack">
+          {% for record in column.records %}
+            {{ records.kanban_card(record) }}
+          {% else %}
+            <div class="kanban-empty">Нет карточек</div>
+          {% endfor %}
+        </div>
+      </article>
+    {% endfor %}
+  </section>
+
+  <nav class="pagination" aria-label="Пагинация">
+    <a class="button ghost" href="/kanban">Первая</a>
+    {% if data.next_offset %}
+      <a class="button primary" href="/kanban?{{ data.next_query }}">Следующая</a>
+    {% endif %}
+  </nav>
+{% endblock %}

@@ -1,3 +1,4 @@
+{% import "partials/icons.html" as icons %}
 <!doctype html>
 <html lang="ru">
   <head>
@@ -9,27 +10,40 @@
     <script src="{{ url_for('static', path='/dashboard.js') }}" defer></script>
   </head>
   <body>
-    <header class="topbar">
-      <a class="brand" href="/">Voice Inbox</a>
-      <nav class="nav" aria-label="Основная навигация">
-        <a href="/records">Последние</a>
-        <a href="/needs-review">Needs Review</a>
-        <a href="/queue">New / Processing</a>
-        <a href="/processed">Processed</a>
-        <a href="/rules">Правила</a>
-        <a href="/technical">Технические</a>
-      </nav>
-    </header>
-    <main class="page">
-      {% if saved %}
-        <p class="notice success">
-          {% if saved == "trained" %}Изменения сохранены, обучение поставлено в очередь processor.{% else %}Изменения сохранены.{% endif %}
-        </p>
-      {% endif %}
-      {% if error %}
-        <p class="notice error">{{ error }}</p>
-      {% endif %}
-      {% block content %}{% endblock %}
-    </main>
+    <div class="app-shell">
+      {% include "partials/sidebar.html" %}
+      <button class="mobile-scrim" type="button" data-sidebar-close aria-label="Закрыть меню"></button>
+
+      <div class="workspace">
+        <header class="topbar">
+          <button class="icon-button sidebar-toggle" type="button" data-sidebar-toggle aria-controls="app-sidebar" aria-expanded="false" title="Меню">
+            {{ icons.icon("menu") }}
+          </button>
+          <form class="global-search" method="get" action="/records">
+            <label>
+              <span class="sr-only">Глобальный поиск</span>
+              <span class="input-with-icon">{{ icons.icon("search") }}<input name="q" type="search" value="{{ request.query_params.get('q', '') }}" autocomplete="off" placeholder="Поиск по Voice Inbox"></span>
+            </label>
+          </form>
+          <div class="topbar-actions">
+            <a class="icon-button" href="/kanban" title="Канбан">{{ icons.icon("kanban") }}</a>
+            <a class="icon-button" href="/needs-review" title="Проверка AI">{{ icons.icon("review") }}</a>
+            <span class="user-pill">{{ icons.icon("user") }}<span>Protected</span></span>
+          </div>
+        </header>
+
+        <main class="page">
+          {% if saved %}
+            <p class="notice success">
+              {% if saved == "trained" %}Изменения сохранены, обучение поставлено в очередь processor.{% else %}Изменения сохранены.{% endif %}
+            </p>
+          {% endif %}
+          {% if error %}
+            <p class="notice error">{{ error }}</p>
+          {% endif %}
+          {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
   </body>
 </html>

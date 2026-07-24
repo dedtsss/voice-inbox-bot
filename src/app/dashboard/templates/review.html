@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% import "partials/record_macros.html" as records %}
+{% block title %}Проверка AI{% endblock %}
+{% block content %}
+  <section class="page-hero compact">
+    <div>
+      <span class="eyebrow">{{ icons.icon("review") }}Needs Review</span>
+      <h1>Проверка AI</h1>
+      <p class="muted">Быстрый разбор записей со статусом Needs Review: сравните текст, поправьте структуру, сохраните или отправьте исправление в обучение.</p>
+    </div>
+  </section>
+
+  {% include "partials/filters.html" %}
+
+  <section class="review-list">
+    {% for record in data.records %}
+      <article class="review-card">
+        <header class="review-head">
+          <div>
+            <a class="record-title" href="/records/{{ record.id }}">{{ record.title }}</a>
+            <div class="review-meta">
+              {{ records.status_pill(record.status) }}
+              <span>{{ record.source or "—" }}</span>
+              <span>{{ record.project or "Без проекта" }}</span>
+              <span>{{ record.created_local }}</span>
+              {% if record.ai_confidence_percent is not none %}<span>AI {{ record.ai_confidence_percent }}%</span>{% endif %}
+            </div>
+          </div>
+          <a class="icon-link" href="/records/{{ record.id }}">{{ icons.icon("arrow") }}<span>Детали</span></a>
+        </header>
+
+        <div class="review-grid">
+          <section class="compare-panel">
+            <div>
+              <h3>Исходный текст</h3>
+              <pre class="text-block">{{ record.raw_text or "—" }}</pre>
+            </div>
+            <div>
+              <h3>Очищенный текст</h3>
+              <pre class="text-block">{{ record.clean_text or "—" }}</pre>
+            </div>
+            <div class="summary-panel">
+              <h3>Summary</h3>
+              <p>{{ record.summary or "—" }}</p>
+              {% if record.processing_error %}
+                <p class="inline-alert">{{ icons.icon("alert") }}{{ record.processing_error }}</p>
+              {% endif %}
+            </div>
+          </section>
+
+          <form class="review-form" method="post" action="/records/{{ record.id }}/save">
+            {{ csrf_input(request)|safe }}
+            <input type="hidden" name="return_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+            {% for field in record.editable_fields %}
+              <label class="{% if field.input_type == 'textarea' %}span-2{% endif %}">
+                <span>{{ field.label }}</span>
+                {% if field.input_type == "select" %}
+                  <select name="{{ field.key }}">
+                    <option value="">—</option>
+                    {% for option in field.options %}
+                      <option value="{{ option }}" {% if field.value == option %}selected{% endif %}>{{ option }}</option>
+                    {% endfor %}
+                  </select>
+                {% elif field.input_type == "textarea" %}
+                  <textarea name="{{ field.key }}" maxlength="{{ field.max_length }}" rows="3">{{ field.value }}</textarea>
+                {% else %}
+                  <input name="{{ field.key }}" type="{{ field.input_type }}" value="{{ field.value }}" {% if field.max_length %}maxlength="{{ field.max_length }}"{% endif %}>
+                {% endif %}
+              </label>
+            {% endfor %}
+            <div class="form-actions span-2">
+              <button class="button primary" type="submit" name="action" value="save">{{ icons.icon("save") }}<span>Сохранить</span></button>
+              <button class="button train" type="submit" name="action" value="save_train">{{ icons.icon("train") }}<span>Сохранить и обучить</span></button>
+            </div>
+          </form>
+        </div>
+      </article>
+    {% else %}
+      <div class="empty-state">
+        {{ icons.icon("check") }}
+        <strong>Нет записей на проверку.</strong>
+        <span>Все текущие Needs Review разобраны или скрыты фильтрами.</span>
+      </div>
+    {% endfor %}
+  </section>
+
+  <nav class="pagination" aria-label="Пагинация">
+    <a class="button ghost" href="/needs-review">Первая</a>
+    {% if data.next_offset %}
+      <a class="button primary" href="/needs-review?{{ data.next_query }}">Следующая</a>
+    {% endif %}
+  </nav>
+{% endblock %}
