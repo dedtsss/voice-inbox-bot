@@ -43,4 +43,23 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   }
+
+  for (const form of document.querySelectorAll("[data-training-form]")) {
+    const updateScope = () => {
+      const selected = form.querySelector("input[name='scope']:checked");
+      const scope = selected instanceof HTMLInputElement ? selected.value : "";
+      for (const block of form.querySelectorAll("[data-scope-dependent]")) {
+        const mode = block.getAttribute("data-scope-dependent");
+        const visible =
+          mode === "work"
+            ? scope === "Рабочее" || scope === "Смешанное"
+            : scope === "Личное" || scope === "Смешанное";
+        block.setAttribute("data-scope-hidden", visible ? "false" : "true");
+      }
+    };
+    for (const input of form.querySelectorAll("input[name='scope']")) {
+      input.addEventListener("change", updateScope);
+    }
+    updateScope();
+  }
 });

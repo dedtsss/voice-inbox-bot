@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import UTC, datetime, timedelta
@@ -94,6 +95,7 @@ def voice_table(
     include_created_time: bool = False,
     created_time_type: str = "createdTime",
     views: list[dict[str, Any]] | None = None,
+    include_training: bool = False,
 ) -> dict[str, Any]:
     def select(name: str, choices: list[str]) -> dict[str, Any]:
         return {"name": name, "type": "singleSelect", "options": {"choices": [{"name": choice} for choice in choices]}}
@@ -126,6 +128,18 @@ def voice_table(
         {"name": "Комментарий к исправлению", "type": "multilineText"},
         {"name": "Обучение учтено", "type": "checkbox"},
     ]
+    if include_training:
+        fields.extend(
+            [
+                select("Training Status", ["Pending", "In Progress", "Completed", "Skipped", "Auto Confirmed"]),
+                select("Scope", ["Личное", "Рабочее", "Смешанное", "Не уверен"]),
+                select("Life Area", ["Дом", "Семья", "Здоровье", "Другое"]),
+                {"name": "Category", "type": "singleLineText"},
+                {"name": "Subcategory", "type": "singleLineText"},
+                {"name": "Training Confirmed At", "type": "dateTime"},
+                {"name": "Training Answers JSON", "type": "multilineText"},
+            ]
+        )
     if include_created_time:
         field: dict[str, Any] = {"name": "Dashboard Created Time", "type": created_time_type}
         if created_time_type == "formula":
@@ -153,6 +167,7 @@ class FakeAirtable:
         self.page_calls: list[dict[str, Any]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.rule_updates: list[tuple[str, dict[str, Any]]] = []
+        self.created_rules: list[dict[str, Any]] = []
         self.rules = [
             {
                 "id": "recRule12345",
@@ -206,9 +221,43 @@ class FakeAirtable:
 
     def _filtered_records(self, formula: str) -> list[dict[str, Any]]:
         records = list(self.records.values())
+        if "{Training Status}" in formula and "{Статус обработки}" in formula:
+            records = [
+                record
+                for record in records
+                if str(record.get("fields", {}).get("Статус обработки") or "") in {"", "Processed", "Needs Review", "New"}
+            ]
+            records = [
+                record
+                for record in records
+                if str(record.get("fields", {}).get("Training Status") or "") in {"", "Pending", "In Progress"}
+            ]
+            technical_patterns = ("smoke", "canary", "production test", "tg-smoke", "dashboard-canary")
+            searchable = ("Название", "Исходная фраза", "Очищенный текст", "External ID", "Notes")
+            records = [
+                record
+                for record in records
+                if not any(
+                    pattern in " ".join(str(record.get("fields", {}).get(field) or "") for field in searchable).casefold()
+                    for pattern in technical_patterns
+                )
+            ]
+            source_match = re.search(r"\{Источник\} = '([^']*)'", formula)
+            if source_match:
+                source = source_match.group(1)
+                records = [record for record in records if str(record.get("fields", {}).get("Источник") or "") == source]
+            if "IS_AFTER(CREATED_TIME()" in formula:
+                cutoff_match = re.search(r"DATETIME_PARSE\\('([^']+)'\\)", formula)
+                cutoff = cutoff_match.group(1) if cutoff_match else ""
+                records = [record for record in records if str(record.get("createdTime") or "") > cutoff]
+            return records
         equals = re.findall(r"\{([^}]+)\} = '([^']*)'", formula)
         for field_name, value in equals:
             if "OR(" in formula and field_name == "Статус обработки" and value in {"New", "Processing"}:
+                continue
+            if "OR(" in formula and field_name == "Статус обработки" and value in {"", "Processed", "Needs Review", "New"}:
+                continue
+            if "OR(" in formula and field_name == "Training Status" and value in {"", "Pending", "In Progress"}:
                 continue
             records = [record for record in records if str(record.get("fields", {}).get(field_name) or "") == value]
         if "OR({Статус обработки} = 'New',{Статус обработки} = 'Processing')" in formula:
@@ -265,6 +314,15 @@ class FakeAirtable:
     def update_processing_rule_fields(self, record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         self.rule_updates.append((record_id, dict(fields)))
         return {"id": record_id, "fields": fields}
+
+    def create_processing_rule(self, fields: dict[str, Any]) -> dict[str, Any]:
+        self.created_rules.append(dict(fields))
+        rule = {"id": f"recRuleCreated{len(self.created_rules)}", "fields": dict(fields)}
+        self.rules.append(rule)
+        return rule
+
+    def list_taxonomy_records(self, *, page_size: int = 100) -> list[dict[str, Any]]:
+        return []
 
 
 def make_client(fake: FakeAirtable | None = None, **settings_overrides: Any) -> tuple[TestClient, FakeAirtable]:
@@ -759,6 +817,251 @@ def test_attachment_proxy_fetches_server_side(monkeypatch: Any) -> None:
     assert response.content == b"audio"
     assert response.headers["content-type"].startswith("audio/mpeg")
     assert called == ["https://content.airtable.com/private/voice.mp3"]
+
+
+def training_table() -> dict[str, Any]:
+    return voice_table(include_created_time=True, include_training=True)
+
+
+def training_answers(**overrides: Any) -> str:
+    answers = {
+        "scope": "Рабочее",
+        "project": "Work",
+        "life_area": "",
+        "category": "Ops",
+        "subcategory": "Inbox",
+        "type": "Задача",
+        "next_action": "Проверить",
+        "priority": "Normal",
+        "due_date": "",
+        "tags": [],
+    }
+    answers.update(overrides)
+    return json.dumps({"schema_version": 1, "record_id": "recSource01", "answers": answers}, ensure_ascii=False)
+
+
+def test_training_queue_includes_processed_and_needs_review_without_needs_review_dependency() -> None:
+    records = [
+        make_record("recTrain001", createdTime=iso(1), **{"Название": "Real processed", "Статус обработки": "Processed"}),
+        make_record("recTrain002", createdTime=iso(2), **{"Название": "Real review", "Статус обработки": "Needs Review"}),
+        make_record("recTrain003", createdTime=iso(3), **{"Название": "Already done", "Training Status": "Completed"}),
+        make_record("recTrain004", createdTime=iso(4), **{"Название": "dashboard-canary smoke", "Статус обработки": "Processed"}),
+        make_record("recTrain005", createdTime="2026-07-23T10:00:00.000Z", **{"Название": "Old archive", "Статус обработки": "Processed"}),
+    ]
+    service = DashboardAirtableService(make_settings(DASHBOARD_CREATED_TIME_FIELD="Dashboard Created Time"), FakeAirtable(records=records, table=training_table()))  # type: ignore[arg-type]
+
+    data = service.training_queue({})
+
+    assert [record["id"] for record in data["records"]] == ["recTrain001", "recTrain002"]
+    formula = dict(service.airtable.page_calls[-1]["params"])["filterByFormula"]  # type: ignore[attr-defined]
+    assert "{Training Status}" in formula
+    assert "{Статус обработки} = 'Needs Review'" in formula
+
+
+def test_training_backlog_is_manual_and_limited() -> None:
+    old = make_record("recOldTrain1", createdTime="2026-07-23T10:00:00.000Z", **{"Название": "Old real", "Статус обработки": "Processed"})
+    service = DashboardAirtableService(make_settings(), FakeAirtable(records=[old], table=training_table()))  # type: ignore[arg-type]
+
+    assert service.training_queue({})["records"] == []
+    assert [record["id"] for record in service.training_queue({"backlog": "1"})["records"]] == ["recOldTrain1"]
+
+
+def test_training_session_questions_are_adaptive_for_work_and_personal() -> None:
+    work = make_record("recWorkPath1", **{"Название": "Work path", "Scope": "Рабочее", "Проект": "Work"})
+    personal = make_record("recPersPath1", **{"Название": "Personal path", "Scope": "Личное", "Life Area": "Дом", "Проект": ""})
+    service = DashboardAirtableService(make_settings(), FakeAirtable(records=[work, personal], table=training_table()))  # type: ignore[arg-type]
+
+    assert "project" in service.learning_session("recWorkPath1")["questions"]
+    assert "life_area" not in service.learning_session("recWorkPath1")["questions"]
+    assert "life_area" in service.learning_session("recPersPath1")["questions"]
+    assert "project" not in service.learning_session("recPersPath1")["questions"]
+
+
+def test_training_start_marks_in_progress_only_on_post() -> None:
+    record = make_record("recStart001", **{"Название": "Start real", "Статус обработки": "Processed"})
+    client, airtable = make_client(FakeAirtable(records=[record], table=training_table()))
+
+    response = client.get("/learning/session", follow_redirects=False)
+    assert response.status_code == 307
+    assert airtable.updates == []
+
+    token = csrf_from(client.get("/learning").text)
+    response = client.post(
+        "/learning/session/start",
+        data={"csrf_token": token},
+        headers={"Origin": "http://testserver"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert airtable.updates[-1] == ("recStart001", {"Training Status": "In Progress"})
+
+
+def test_training_complete_saves_structured_answers_without_user_text_blob() -> None:
+    record = make_record("recComplete1", **{"Название": "Complete real", "Статус обработки": "Processed"})
+    client, airtable = make_client(FakeAirtable(records=[record], table=training_table()))
+    token = csrf_from(client.get("/learning/session/recComplete1").text)
+
+    response = client.post(
+        "/learning/session/recComplete1/complete",
+        data={
+            "csrf_token": token,
+            "scope": "Рабочее",
+            "project": "Work",
+            "entry_type": "Задача",
+            "next_action": "Проверить",
+            "priority": "Normal",
+            "category": "Ops",
+            "subcategory": "Inbox",
+        },
+        headers={"Origin": "http://testserver"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    _, fields = airtable.updates[-1]
+    assert fields["Training Status"] == "Completed"
+    assert fields["Scope"] == "Рабочее"
+    assert fields["Проект"] == "Work"
+    assert fields["Тип"] == "Задача"
+    payload = json.loads(fields["Training Answers JSON"])
+    assert payload["answers"]["category"] == "Ops"
+    assert "raw text" not in fields["Training Answers JSON"]
+    assert "Attachments" not in fields["Training Answers JSON"]
+
+
+def test_training_skip_sets_skipped_status() -> None:
+    record = make_record("recSkip0001", **{"Название": "Skip real", "Статус обработки": "Processed"})
+    client, airtable = make_client(FakeAirtable(records=[record], table=training_table()))
+    token = csrf_from(client.get("/learning/session/recSkip0001").text)
+
+    response = client.post(
+        "/learning/session/recSkip0001/skip",
+        data={"csrf_token": token},
+        headers={"Origin": "http://testserver"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert airtable.updates[-1][1]["Training Status"] == "Skipped"
+
+
+def test_training_complete_rejects_unknown_form_field_and_requires_csrf() -> None:
+    record = make_record("recReject01", **{"Название": "Reject real", "Статус обработки": "Processed"})
+    service = DashboardAirtableService(make_settings(), FakeAirtable(records=[record], table=training_table()))  # type: ignore[arg-type]
+
+    result = service.complete_training_record(
+        "recReject01",
+        {"scope": "Рабочее", "project": "Work", "entry_type": "Задача", "next_action": "Проверить", "raw_text": "bad"},
+    )
+
+    assert result.errors["raw_text"] == "Unknown training field"
+
+    client, _ = make_client(FakeAirtable(records=[record], table=training_table()))
+    response = client.post(
+        "/learning/session/recReject01/complete",
+        data={"csrf_token": "bad"},
+        headers={"Origin": "http://testserver"},
+    )
+    assert response.status_code == 403
+
+
+def test_training_batch_apply_updates_only_selected_records_and_enforces_limit() -> None:
+    source = make_record(
+        "recSource01",
+        **{"Название": "Source real", "Training Status": "Completed", "Training Answers JSON": training_answers()},
+    )
+    selected = make_record("recSelect01", **{"Название": "Similar selected", "Статус обработки": "Processed"})
+    unselected = make_record("recSelect02", **{"Название": "Similar unselected", "Статус обработки": "Processed"})
+    client, airtable = make_client(FakeAirtable(records=[source, selected, unselected], table=training_table()))
+    token = csrf_from(client.get("/learning/session/recSource01").text)
+
+    response = client.post(
+        "/learning/batch-apply",
+        data={"csrf_token": token, "source_record_id": "recSource01", "record_ids": ["recSelect01"]},
+        headers={"Origin": "http://testserver"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    updated_ids = [record_id for record_id, _ in airtable.updates]
+    assert "recSelect01" in updated_ids
+    assert "recSelect02" not in updated_ids
+
+    service = DashboardAirtableService(
+        make_settings(VOICE_TRAINING_BATCH_LIMIT=2),
+        FakeAirtable(records=[source, selected, unselected], table=training_table()),  # type: ignore[arg-type]
+    )
+    too_many = service.batch_apply_training("recSource01", ["recSelect01", "recSelect02", "recTrain003"])
+    assert too_many.errors["record_ids"] == "Максимум записей за раз: 2"
+
+
+def test_similarity_suggestion_uses_token_overlap_and_existing_hints() -> None:
+    current = make_record(
+        "recSimilar1",
+        **{"Название": "Оплатить счет за сервер", "Исходная фраза": "оплатить счет за сервер", "Очищенный текст": "оплатить счет за сервер", "Краткое содержание": "сервер счет", "Проект": "Work", "Тип": "Задача"},
+    )
+    similar = make_record(
+        "recSimilar2",
+        **{"Название": "Проверить счет за сервер", "Исходная фраза": "проверить счет за сервер", "Очищенный текст": "проверить счет за сервер", "Краткое содержание": "сервер счет", "Проект": "Work", "Тип": "Задача"},
+    )
+    different = make_record(
+        "recSimilar3",
+        **{"Название": "Купить продукты домой", "Исходная фраза": "купить продукты домой", "Очищенный текст": "купить продукты домой", "Краткое содержание": "дом покупки", "Проект": "Home", "Тип": "Note"},
+    )
+    service = DashboardAirtableService(make_settings(), FakeAirtable(records=[current, similar, different], table=training_table()))  # type: ignore[arg-type]
+
+    session = service.learning_session("recSimilar1")
+
+    assert [record["id"] for record in session["similar_records"]] == ["recSimilar2"]
+
+
+def test_rule_is_not_created_after_one_example_but_can_be_created_explicitly_after_threshold() -> None:
+    one = make_record("recRuleOne1", **{"Название": "One rule", "Training Status": "Completed", "Training Answers JSON": training_answers()})
+    service = DashboardAirtableService(make_settings(), FakeAirtable(records=[one], table=training_table()))  # type: ignore[arg-type]
+    assert service.rule_proposals() == []
+    assert service.airtable.created_rules == []  # type: ignore[attr-defined]
+
+    records = [
+        make_record(f"recRuleThr{i}", **{"Название": f"Rule {i}", "Training Status": "Completed", "Training Answers JSON": training_answers()})
+        for i in range(3)
+    ]
+    fake = FakeAirtable(records=records, table=training_table())
+    service = DashboardAirtableService(make_settings(), fake)  # type: ignore[arg-type]
+
+    proposals = service.rule_proposals()
+    assert len(proposals) == 1
+    result = service.create_training_rule(proposals[0]["key"])
+
+    assert result.errors == {}
+    assert fake.created_rules[0]["Активно"] is True
+    assert fake.created_rules[0]["Правильное решение"]
+
+
+def test_learning_pages_render_queue_session_rules_and_structure() -> None:
+    record = make_record("recRender01", **{"Название": "Render real", "Статус обработки": "Processed"})
+    client, _ = make_client(FakeAirtable(records=[record], table=training_table()))
+
+    for path, marker in {
+        "/learning?tab=queue": "Очередь",
+        "/learning/session/recRender01": "Мастер",
+        "/learning?tab=rules": "Предложения правил",
+        "/learning?tab=structure": "Рабочие проекты",
+    }.items():
+        response = client.get(path)
+        assert response.status_code == 200
+        assert marker in response.text
+
+
+def test_learning_session_escapes_user_text() -> None:
+    record = make_record("recLearnXss", **{"Название": "Real", "Исходная фраза": "<script>alert(1)</script>", "Статус обработки": "Processed"})
+    client, _ = make_client(FakeAirtable(records=[record], table=training_table()))
+
+    response = client.get("/learning/session/recLearnXss")
+
+    assert response.status_code == 200
+    assert "<script>alert(1)</script>" not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
 
 
 def test_robots_disallows_indexing() -> None:

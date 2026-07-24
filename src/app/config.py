@@ -84,6 +84,33 @@ class Settings(BaseSettings):
         alias="VOICE_FIELD_CORRECTION_COMMENT",
     )
     voice_field_training_applied: str = Field(default="Обучение учтено", alias="VOICE_FIELD_TRAINING_APPLIED")
+    voice_field_training_status: str = Field(default="Training Status", alias="VOICE_FIELD_TRAINING_STATUS")
+    voice_field_scope: str = Field(default="Scope", alias="VOICE_FIELD_SCOPE")
+    voice_field_life_area: str = Field(default="Life Area", alias="VOICE_FIELD_LIFE_AREA")
+    voice_field_category: str = Field(default="Category", alias="VOICE_FIELD_CATEGORY")
+    voice_field_subcategory: str = Field(default="Subcategory", alias="VOICE_FIELD_SUBCATEGORY")
+    voice_field_training_confirmed_at: str = Field(
+        default="Training Confirmed At",
+        alias="VOICE_FIELD_TRAINING_CONFIRMED_AT",
+    )
+    voice_field_training_answers_json: str = Field(
+        default="Training Answers JSON",
+        alias="VOICE_FIELD_TRAINING_ANSWERS_JSON",
+    )
+    voice_training_created_after: str = Field(
+        default="2026-07-24T00:00:00Z",
+        alias="VOICE_TRAINING_CREATED_AFTER",
+    )
+    voice_training_queue_limit: int = Field(default=50, alias="VOICE_TRAINING_QUEUE_LIMIT")
+    voice_training_backlog_limit: int = Field(default=20, alias="VOICE_TRAINING_BACKLOG_LIMIT")
+    voice_training_similarity_limit: int = Field(default=5, alias="VOICE_TRAINING_SIMILARITY_LIMIT")
+    voice_training_batch_limit: int = Field(default=20, alias="VOICE_TRAINING_BATCH_LIMIT")
+    voice_training_rule_threshold: int = Field(default=3, alias="VOICE_TRAINING_RULE_THRESHOLD")
+    voice_training_life_areas: str = Field(
+        default="Дом,Семья,Здоровье,Финансы,Покупки,Документы,Обучение,Идеи,Отдых,Другое",
+        alias="VOICE_TRAINING_LIFE_AREAS",
+    )
+    voice_training_taxonomy_table_name: str = Field(default="Таксономия", alias="VOICE_TRAINING_TAXONOMY_TABLE_NAME")
 
     projects_base_id: str = Field(alias="PROJECTS_BASE_ID")
     projects_table_id: str = Field(alias="PROJECTS_TABLE_ID")
@@ -198,6 +225,14 @@ class Settings(BaseSettings):
             parse_utc_timestamp(text)
         return text
 
+    @field_validator("voice_training_created_after")
+    @classmethod
+    def validate_voice_training_created_after(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if text:
+            parse_utc_timestamp(text)
+        return text
+
     @property
     def allowed_user_ids(self) -> set[int]:
         ids: set[int] = set()
@@ -233,6 +268,20 @@ class Settings(BaseSettings):
         if not self.voice_processor_created_after:
             return None
         return parse_utc_timestamp(self.voice_processor_created_after)
+
+    @property
+    def voice_training_created_after_datetime(self) -> datetime | None:
+        if not self.voice_training_created_after:
+            return None
+        return parse_utc_timestamp(self.voice_training_created_after)
+
+    @property
+    def voice_training_life_area_options(self) -> list[str]:
+        return [
+            part.strip()
+            for part in self.voice_training_life_areas.replace(";", ",").split(",")
+            if part.strip()
+        ]
 
 
 @lru_cache(maxsize=1)

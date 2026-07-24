@@ -106,8 +106,94 @@ def create_dashboard_app(
 
     @app.get("/learning", response_class=HTMLResponse)
     async def learning(request: Request, saved: str = "", error: str = "") -> Response:
-        data = await to_thread(service.learning_dashboard)
+        data = await to_thread(service.learning_dashboard, clean_learning_query(request.query_params))
         return render(request, "learning.html", {"data": data, "saved": saved, "error": error})
+
+    @app.post("/learning/session/start")
+    async def learning_session_start(request: Request) -> Response:
+        form = await request.form(max_fields=20, max_files=0)
+        csrf_token = str(form.get("csrf_token") or "")
+        if not validate_csrf_token(resolved_settings.dashboard_csrf_secret, csrf_token):
+            raise HTTPException(status_code=403, detail="Invalid CSRF token")
+        query = {key: str(form.get(key) or "") for key in ("source", "period", "backlog") if str(form.get(key) or "").strip()}
+        record_id = await to_thread(service.start_training_session, query)
+        if not record_id:
+            return RedirectResponse(url="/learning?tab=session&error=empty", status_code=303)
+        return RedirectResponse(url=f"/learning/session/{record_id}", status_code=303)
+
+    @app.get("/learning/session", response_class=HTMLResponse)
+    async def learning_session_continue() -> Response:
+        record_id = await to_thread(service.start_training_session, {}, mark_in_progress=False)
+        if not record_id:
+            return RedirectResponse(url="/learning?tab=session&error=empty", status_code=303)
+        return RedirectResponse(url=f"/learning/session/{record_id}", status_code=307)
+
+    @app.get("/learning/session/{record_id}", response_class=HTMLResponse)
+    async def learning_session_card(request: Request, record_id: str, saved: str = "", error: str = "") -> Response:
+        query = clean_learning_query(request.query_params)
+        query["tab"] = "session"
+        data = await to_thread(service.learning_dashboard, query)
+        data["active_tab"] = "session"
+        data["session"] = await to_thread(service.learning_session, record_id, query)
+        return render(request, "learning.html", {"data": data, "saved": saved, "error": error})
+
+    @app.post("/learning/session/{record_id}/complete")
+    async def learning_session_complete(request: Request, record_id: str) -> Response:
+        form = await request.form(max_fields=40, max_files=0)
+        csrf_token = str(form.get("csrf_token") or "")
+        if not validate_csrf_token(resolved_settings.dashboard_csrf_secret, csrf_token):
+            raise HTTPException(status_code=403, detail="Invalid CSRF token")
+        result = await to_thread(service.complete_training_record, record_id, dict(form))
+        if result.errors:
+            data = await to_thread(service.learning_dashboard, {"tab": "session"})
+            data["active_tab"] = "session"
+            data["session"] = await to_thread(service.learning_session, record_id, {"tab": "session"})
+            return render(
+                request,
+                "learning.html",
+                {"data": data, "errors": result.errors, "error": "Проверьте ответы мастера"},
+                status_code=422,
+            )
+        next_id = await to_thread(service.start_training_session, {})
+        if next_id:
+            return RedirectResponse(url=f"/learning/session/{next_id}?saved=training", status_code=303)
+        return RedirectResponse(url="/learning?tab=session&saved=training_complete", status_code=303)
+
+    @app.post("/learning/session/{record_id}/skip")
+    async def learning_session_skip(request: Request, record_id: str) -> Response:
+        form = await request.form(max_fields=5, max_files=0)
+        csrf_token = str(form.get("csrf_token") or "")
+        if not validate_csrf_token(resolved_settings.dashboard_csrf_secret, csrf_token):
+            raise HTTPException(status_code=403, detail="Invalid CSRF token")
+        await to_thread(service.skip_training_record, record_id)
+        next_id = await to_thread(service.start_training_session, {})
+        if next_id:
+            return RedirectResponse(url=f"/learning/session/{next_id}?saved=skipped", status_code=303)
+        return RedirectResponse(url="/learning?tab=session&saved=skipped", status_code=303)
+
+    @app.post("/learning/batch-apply")
+    async def learning_batch_apply(request: Request) -> Response:
+        form = await request.form(max_fields=40, max_files=0)
+        csrf_token = str(form.get("csrf_token") or "")
+        if not validate_csrf_token(resolved_settings.dashboard_csrf_secret, csrf_token):
+            raise HTTPException(status_code=403, detail="Invalid CSRF token")
+        source_record_id = str(form.get("source_record_id") or "")
+        selected = [str(value) for value in form.getlist("record_ids")]
+        result = await to_thread(service.batch_apply_training, source_record_id, selected)
+        if result.errors:
+            return RedirectResponse(url=f"/learning/session/{source_record_id}?error=batch", status_code=303)
+        return RedirectResponse(url=f"/learning/session/{source_record_id}?saved=batch", status_code=303)
+
+    @app.post("/learning/rules/create")
+    async def learning_rule_create(request: Request) -> Response:
+        form = await request.form(max_fields=10, max_files=0)
+        csrf_token = str(form.get("csrf_token") or "")
+        if not validate_csrf_token(resolved_settings.dashboard_csrf_secret, csrf_token):
+            raise HTTPException(status_code=403, detail="Invalid CSRF token")
+        result = await to_thread(service.create_training_rule, str(form.get("proposal_key") or ""))
+        if result.errors:
+            return RedirectResponse(url="/learning?tab=rules&error=rule", status_code=303)
+        return RedirectResponse(url="/learning?tab=rules&saved=rule", status_code=303)
 
     @app.get("/projects", response_class=HTMLResponse)
     async def projects(request: Request) -> Response:
@@ -165,8 +251,8 @@ def create_dashboard_app(
 
     @app.get("/rules", response_class=HTMLResponse)
     async def rules(request: Request, saved: str = "", error: str = "") -> Response:
-        data = await to_thread(service.list_rules)
-        return render(request, "learning.html", {"data": {**data, "cards": {}, "recent_cases": []}, "saved": saved, "error": error})
+        data = await to_thread(service.learning_dashboard, {"tab": "rules"})
+        return render(request, "learning.html", {"data": data, "saved": saved, "error": error})
 
     @app.post("/rules/{record_id}/active")
     async def set_rule_active(request: Request, record_id: str) -> Response:
@@ -198,6 +284,15 @@ async def to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
 
 def clean_query(query_params: Any) -> dict[str, str]:
     allowed = {"q", "status", "source", "project", "entry_type", "period", "sort", "offset", "page_size", "technical", "queue"}
+    return {
+        key: str(value)[:500]
+        for key, value in query_params.items()
+        if key in allowed and str(value).strip()
+    }
+
+
+def clean_learning_query(query_params: Any) -> dict[str, str]:
+    allowed = {"source", "period", "offset", "page_size", "sort", "backlog", "tab"}
     return {
         key: str(value)[:500]
         for key, value in query_params.items()

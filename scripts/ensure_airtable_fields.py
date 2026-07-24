@@ -12,11 +12,13 @@ def main() -> None:
     airtable = AirtableClient(settings)
     metadata_created = airtable.ensure_voice_inbox_metadata_fields()
     processor_schema = airtable.ensure_voice_processor_schema()
+    training_schema = airtable.ensure_voice_training_schema()
     print(
         json.dumps(
             {
                 "metadata_created": metadata_created,
                 "processor_schema": processor_schema,
+                "training_schema": training_schema,
             },
             ensure_ascii=False,
             indent=2,

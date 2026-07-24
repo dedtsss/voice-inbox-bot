@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import mimetypes
 import re
@@ -26,6 +27,41 @@ from app.config import Settings
 from app.voice_processor import allowed_context_from_metadata, get_field
 
 TECHNICAL_PATTERNS = ("smoke", "canary", "production test", "TG-SMOKE", "dashboard-canary")
+TRAINING_STATUSES = ("Pending", "In Progress", "Completed", "Skipped", "Auto Confirmed")
+TRAINING_SCOPE_OPTIONS = ("Личное", "Рабочее", "Смешанное", "Не уверен")
+TRAINING_ENTRY_TYPE_OPTIONS = (
+    "Задача",
+    "Заметка",
+    "Идея",
+    "Напоминание",
+    "Документ",
+    "Финансовая запись",
+    "Контакт",
+    "Событие",
+    "Другое",
+)
+TRAINING_NEXT_ACTION_OPTIONS = (
+    "Выполнить",
+    "Проверить",
+    "Запланировать",
+    "Передать",
+    "Уточнить",
+    "Сохранить для информации",
+    "Без действия",
+)
+TRAINING_FORM_KEYS = {
+    "csrf_token",
+    "scope",
+    "project",
+    "life_area",
+    "entry_type",
+    "next_action",
+    "priority",
+    "due_date",
+    "category",
+    "subcategory",
+    "tags",
+}
 EDITABLE_KEYS = (
     "project",
     "entry_type",
@@ -84,6 +120,15 @@ class ValidationResult:
 
 
 @dataclass(frozen=True)
+class RuleProposal:
+    key: str
+    label: str
+    condition: str
+    decision: dict[str, Any]
+    count: int
+
+
+@dataclass(frozen=True)
 class SortingConfig:
     mode: str
     direction: str
@@ -110,12 +155,17 @@ class DashboardAirtableService:
         rules_table_id = self.airtable.rules_table_id()
         if rules_table_id:
             rules_table = self.airtable.find_table_metadata(self.settings.voice_inbox_base_id, table_id=rules_table_id)
+        taxonomy_table = self.airtable.find_table_metadata(
+            self.settings.voice_inbox_base_id,
+            table_name=self.settings.voice_training_taxonomy_table_name,
+        )
         return {
             "table": table,
             "projects": projects,
             "allowed": allowed,
             "bindings": bindings,
             "rules_table": rules_table,
+            "taxonomy_table": taxonomy_table,
         }
 
     def overview(self) -> dict[str, Any]:
@@ -133,6 +183,12 @@ class DashboardAirtableService:
                 bindings["clean_text"],
                 bindings["notes"],
                 bindings["processing_error"],
+                bindings["training_status"],
+                bindings["scope"],
+                bindings["life_area"],
+                bindings["category"],
+                bindings["subcategory"],
+                bindings["training_confirmed_at"],
             ]
         )
         records, limited = self.airtable.list_voice_records_limited(
@@ -161,6 +217,11 @@ class DashboardAirtableService:
             "training_applied": 0,
             "rules_total": 0,
             "rules_active": 0,
+            "training_queue": 0,
+            "training_completed_today": 0,
+            "training_auto_confirmed": 0,
+            "training_needs_clarification": 0,
+            "training_rules_proposed": 0,
             "ai_confidence_avg": None,
         }
         technical = 0
@@ -204,6 +265,16 @@ class DashboardAirtableService:
                 cards["training_pending"] += 1
             if train_applied:
                 cards["training_applied"] += 1
+            training_status = effective_training_status(item)
+            if training_status in {"Pending", "In Progress"} and training_queue_eligible(item, self.settings):
+                cards["training_queue"] += 1
+            if training_status == "Auto Confirmed":
+                cards["training_auto_confirmed"] += 1
+            confirmed_at = parse_airtable_datetime(item.get("training_confirmed_at"))
+            if training_status == "Completed" and confirmed_at and confirmed_at >= today_start:
+                cards["training_completed_today"] += 1
+            if training_status in {"Pending", "In Progress"} and training_needs_clarification(item):
+                cards["training_needs_clarification"] += 1
             with contextlib.suppress(TypeError, ValueError):
                 confidence = float(item.get("ai_confidence"))
                 if 1 < confidence <= 100:
@@ -215,6 +286,7 @@ class DashboardAirtableService:
         cards["rules_active"] = sum(1 for rule in rules if normalize_rule(rule)["active"])
         if confidence_values:
             cards["ai_confidence_avg"] = round(sum(confidence_values) / len(confidence_values), 2)
+        cards["training_rules_proposed"] = len(self.rule_proposals(metadata=metadata, records=normalized_records))
         recent_records = sorted(
             normalized_records,
             key=lambda item: item["created_at"] or datetime.min.replace(tzinfo=UTC),
@@ -335,7 +407,10 @@ class DashboardAirtableService:
         ensure_record_id(record_id)
         metadata = self.metadata()
         bindings: dict[str, FieldBinding] = metadata["bindings"]
-        record = self.airtable.fetch_voice_record(record_id)
+        try:
+            record = self.airtable.fetch_voice_record(record_id)
+        except KeyError as exc:
+            raise AirtableError("Voice Inbox record was not found") from exc
         item = normalize_record(record, bindings, self.settings)
         item["editable_fields"] = editable_fields(item, metadata)
         item["attachments"] = attachments_for_record(item)
@@ -371,23 +446,266 @@ class DashboardAirtableService:
             "active_supported": rules_active_supported(metadata.get("rules_table")),
         }
 
-    def learning_dashboard(self) -> dict[str, Any]:
+    def learning_dashboard(self, query: dict[str, str] | None = None) -> dict[str, Any]:
+        query = dict(query or {})
         rules_data = self.list_rules()
         overview = self.overview()
+        queue_data = self.training_queue(query)
+        structure = self.learning_structure()
+        proposals = self.rule_proposals()
         recent_cases = [
             record
             for record in overview["recent_records"]
             if truthy_value(record.get("train_on_correction"))
             or truthy_value(record.get("training_applied"))
+            or effective_training_status(record) in {"Completed", "Auto Confirmed"}
             or record.get("correction_comment")
         ][:6]
         return {
+            "active_tab": query.get("tab") if query.get("tab") in {"queue", "session", "rules", "structure"} else "queue",
             "rules": rules_data["rules"],
             "active_supported": rules_data["active_supported"],
             "cards": overview["cards"],
+            "queue": queue_data,
             "recent_cases": recent_cases,
             "project_counts": overview["project_counts"],
             "type_counts": overview["type_counts"],
+            "proposed_rules": proposals,
+            "structure": structure,
+            "cutoff": self.settings.voice_training_created_after or "",
+            "batch_limit": max(1, min(self.settings.voice_training_batch_limit, 20)),
+        }
+
+    def training_queue(self, query: dict[str, str] | None = None) -> dict[str, Any]:
+        query = dict(query or {})
+        metadata = self.metadata()
+        bindings: dict[str, FieldBinding] = metadata["bindings"]
+        backlog = str(query.get("backlog") or "") == "1"
+        configured_limit = self.settings.voice_training_backlog_limit if backlog else self.settings.voice_training_queue_limit
+        page_size = parse_int(query.get("page_size"), default=configured_limit, minimum=1, maximum=min(100, max(1, configured_limit)))
+        offset = query.get("offset", "").strip()
+        sorting = resolve_sorting_config(self.settings, metadata["table"], query.get("sort"))
+        formula = build_training_queue_formula(query, bindings, self.settings, include_cutoff=not backlog)
+        params = limited_fields_params([bindings[key] for key in training_record_binding_keys()])
+        if formula:
+            params.append(("filterByFormula", formula))
+        params.extend(sorting.params)
+        payload = self.airtable.list_voice_records_page(params=params, page_size=page_size, offset=offset)
+        records = [
+            item
+            for item in (normalize_record(record, bindings, self.settings) for record in payload.get("records") or [])
+            if training_queue_eligible(item, self.settings, include_cutoff=not backlog)
+            and training_query_matches(item, query)
+        ]
+        if sorting.mode == SORTING_MODE_PAGE_ONLY_UNSAFE:
+            records.sort(
+                key=lambda item: item["created_at"] or datetime.min.replace(tzinfo=UTC),
+                reverse=sorting.direction == "desc",
+            )
+        in_progress = [record for record in records if effective_training_status(record) == "In Progress"]
+        return {
+            "records": records,
+            "in_progress": in_progress,
+            "next_offset": payload.get("offset") or "",
+            "next_query": next_query(query, str(payload.get("offset") or "")),
+            "view_query": view_query(query),
+            "filters": query,
+            "options": training_filter_options(metadata, self.settings),
+            "page_size": page_size,
+            "backlog": backlog,
+            "created_sort_is_exact": sorting.is_exact,
+            "sorting_mode": sorting.mode,
+        }
+
+    def start_training_session(self, query: dict[str, str] | None = None, *, mark_in_progress: bool = True) -> str:
+        queue = self.training_queue(query)
+        records = queue["in_progress"] or queue["records"]
+        if not records:
+            return ""
+        record = records[0]
+        if mark_in_progress and effective_training_status(record) != "In Progress":
+            bindings: dict[str, FieldBinding] = self.metadata()["bindings"]
+            self.airtable.update_voice_record_fields(record["id"], {bindings["training_status"].write_name: "In Progress"})
+        return str(record["id"])
+
+    def learning_session(self, record_id: str, query: dict[str, str] | None = None) -> dict[str, Any]:
+        record = self.fetch_record(record_id)
+        metadata = self.metadata()
+        queue_data = self.training_queue(query)
+        queue_ids = [item["id"] for item in queue_data["records"]]
+        position = queue_ids.index(record_id) + 1 if record_id in queue_ids else 1
+        previous_id = queue_ids[position - 2] if position > 1 and position - 2 < len(queue_ids) else ""
+        next_id = queue_ids[position] if position < len(queue_ids) else ""
+        return {
+            "record": record,
+            "options": training_form_options(metadata, self.settings),
+            "questions": question_keys_for_training(record.get("scope") or infer_scope_from_record(record)),
+            "ai_proposal": ai_proposal_for_record(record),
+            "similar_records": self.similar_records(record, queue_data["records"]),
+            "progress": {
+                "position": position,
+                "total": max(len(queue_ids), position),
+                "previous_id": previous_id,
+                "next_id": next_id,
+            },
+            "queue": queue_data,
+        }
+
+    def complete_training_record(self, record_id: str, form: dict[str, Any]) -> ValidationResult:
+        ensure_record_id(record_id)
+        metadata = self.metadata()
+        current = self.fetch_record(record_id)
+        fields, errors = validate_training_form(form, current, metadata, self.settings)
+        if errors:
+            return ValidationResult(fields={}, errors=errors)
+        self.airtable.update_voice_record_fields(record_id, fields)
+        return ValidationResult(fields=fields, errors={})
+
+    def skip_training_record(self, record_id: str) -> None:
+        ensure_record_id(record_id)
+        bindings: dict[str, FieldBinding] = self.metadata()["bindings"]
+        self.airtable.update_voice_record_fields(
+            record_id,
+            {
+                bindings["training_status"].write_name: "Skipped",
+                bindings["training_confirmed_at"].write_name: datetime.now(UTC).isoformat(),
+            },
+        )
+
+    def batch_apply_training(self, source_record_id: str, selected_record_ids: list[str]) -> ValidationResult:
+        ensure_record_id(source_record_id)
+        limit = max(1, min(self.settings.voice_training_batch_limit, 20))
+        cleaned = list(dict.fromkeys(record_id for record_id in selected_record_ids if record_id))
+        errors: dict[str, str] = {}
+        if not cleaned:
+            errors["record_ids"] = "Выберите хотя бы одну запись"
+        if len(cleaned) > limit:
+            errors["record_ids"] = f"Максимум записей за раз: {limit}"
+        for record_id in cleaned:
+            with contextlib.suppress(AirtableError):
+                ensure_record_id(record_id)
+                continue
+            errors[record_id] = "Недопустимый record ID"
+        source = self.fetch_record(source_record_id)
+        answers = parse_training_answers(source.get("training_answers_json"))
+        if not answers:
+            errors["source_record_id"] = "У исходной записи нет сохраненной классификации"
+        if errors:
+            return ValidationResult(fields={}, errors=errors)
+
+        metadata = self.metadata()
+        updated: dict[str, Any] = {}
+        for record_id in cleaned:
+            target = self.fetch_record(record_id)
+            if not training_queue_eligible(target, self.settings, include_cutoff=False):
+                errors[record_id] = "Запись не входит в безопасную очередь обучения"
+                continue
+            fields = fields_from_training_answers(
+                answers,
+                target,
+                metadata,
+                self.settings,
+                status="Completed",
+                applied_from=source_record_id,
+            )
+            self.airtable.update_voice_record_fields(record_id, fields)
+            updated[record_id] = fields
+        if errors:
+            return ValidationResult(fields={}, errors=errors)
+        return ValidationResult(fields=updated, errors={})
+
+    def similar_records(self, record: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for candidate in candidates[: max(1, self.settings.voice_training_queue_limit)]:
+            if candidate.get("id") == record.get("id"):
+                continue
+            score = record_similarity(record, candidate)
+            if score >= 0.18:
+                item = dict(candidate)
+                item["similarity_percent"] = round(score * 100)
+                scored.append((score, item))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [item for _, item in scored[: max(1, min(self.settings.voice_training_similarity_limit, 10))]]
+
+    def rule_proposals(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+        records: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        metadata = metadata or self.metadata()
+        if records is None:
+            bindings: dict[str, FieldBinding] = metadata["bindings"]
+            params = limited_fields_params([bindings[key] for key in training_record_binding_keys()])
+            params.append(("filterByFormula", equals_formula(bindings["training_status"], "Completed")))
+            raw_records, _ = self.airtable.list_voice_records_limited(params=params, max_records=100)
+            records = [normalize_record(record, bindings, self.settings) for record in raw_records]
+        existing_conditions = {str(rule.get("condition") or "") for rule in self.list_rules()["rules"]}
+        proposals = build_rule_proposals(records, threshold=max(2, self.settings.voice_training_rule_threshold))
+        return [
+            {
+                "key": proposal.key,
+                "label": proposal.label,
+                "condition": proposal.condition,
+                "decision_json": json.dumps(proposal.decision, ensure_ascii=False, sort_keys=True),
+                "count": proposal.count,
+            }
+            for proposal in proposals
+            if proposal.condition not in existing_conditions
+        ][:6]
+
+    def create_training_rule(self, proposal_key: str) -> ValidationResult:
+        proposals = self.rule_proposals()
+        proposal = next((item for item in proposals if item["key"] == proposal_key), None)
+        if not proposal:
+            return ValidationResult(fields={}, errors={"proposal_key": "Предложение правила не найдено"})
+        decision = parse_training_answers(proposal["decision_json"])
+        fields = {
+            "Правило": f"Training: {proposal['label']}"[:120],
+            "Активно": True,
+            "Область": "Маршрутизация" if decision.get("project") else "Тип",
+            "Условие": proposal["condition"],
+            "Правильное решение": proposal["decision_json"],
+            "Проект": decision.get("project") or "",
+            "Тип": decision.get("type") or "",
+            "Положительный пример": f"dashboard training confirmations: {proposal['count']}",
+            "Источник записи": "Dashboard training",
+            "Комментарий пользователя": "Создано после явного подтверждения в модуле Разбор и обучение",
+        }
+        self.airtable.create_processing_rule(fields)
+        return ValidationResult(fields=fields, errors={})
+
+    def learning_structure(self) -> dict[str, Any]:
+        metadata = self.metadata()
+        bindings: dict[str, FieldBinding] = metadata["bindings"]
+        params = limited_fields_params(
+            [
+                bindings["project"],
+                bindings["scope"],
+                bindings["life_area"],
+                bindings["category"],
+                bindings["subcategory"],
+                bindings["training_status"],
+            ]
+        )
+        raw_records, limited = self.airtable.list_voice_records_limited(params=params, max_records=300)
+        records = [normalize_record(record, bindings, self.settings) for record in raw_records]
+        projects = Counter(str(record.get("project") or "") for record in records if record.get("project"))
+        life_areas = Counter(str(record.get("life_area") or "") for record in records if record.get("life_area"))
+        categories = Counter(str(record.get("category") or "") for record in records if record.get("category"))
+        subcategories = Counter(str(record.get("subcategory") or "") for record in records if record.get("subcategory"))
+        taxonomy_records = []
+        if hasattr(self.airtable, "list_taxonomy_records"):
+            with contextlib.suppress(AirtableError):
+                taxonomy_records = [normalize_taxonomy_record(record) for record in self.airtable.list_taxonomy_records(page_size=100)]
+        return {
+            "projects": [{"title": project.title, "count": projects.get(project.title, 0)} for project in metadata["allowed"].projects],
+            "life_areas": count_items(life_areas),
+            "categories": count_items(categories),
+            "subcategories": count_items(subcategories),
+            "taxonomy_records": taxonomy_records,
+            "taxonomy_supported": bool(metadata.get("taxonomy_table")),
+            "limited": limited,
         }
 
     def projects_dashboard(self) -> dict[str, Any]:
@@ -507,12 +825,19 @@ def build_field_bindings(settings: Settings, table: dict[str, Any]) -> dict[str,
         "train_on_correction": ("Обучить на исправлении", settings.voice_field_train_on_correction),
         "correction_comment": ("Комментарий к исправлению", settings.voice_field_correction_comment),
         "training_applied": ("Обучение учтено", settings.voice_field_training_applied),
+        "training_status": ("Training Status", settings.voice_field_training_status),
+        "scope": ("Scope", settings.voice_field_scope),
+        "life_area": ("Life Area", settings.voice_field_life_area),
+        "category": ("Category", settings.voice_field_category),
+        "subcategory": ("Subcategory", settings.voice_field_subcategory),
+        "training_confirmed_at": ("Training Confirmed At", settings.voice_field_training_confirmed_at),
+        "training_answers_json": ("Training Answers JSON", settings.voice_field_training_answers_json),
     }
     bindings: dict[str, FieldBinding] = {}
     for key, (fallback_label, configured) in definitions.items():
         field = find_field_metadata(table, configured) or find_field_metadata(table, fallback_label)
         read_name = str(field.get("name") or configured or fallback_label) if field else configured or fallback_label
-        field_type = str(field.get("type") or "")
+        field_type = str((field or {}).get("type") or "")
         options = tuple(
             str(choice.get("name") or "").strip()
             for choice in ((field or {}).get("options") or {}).get("choices") or []
@@ -564,6 +889,7 @@ def normalize_record(record: dict[str, Any], bindings: dict[str, FieldBinding], 
     item["is_stale"] = item["age_state"] == "stale"
     item["is_technical"] = is_technical_record(item)
     item["ai_confidence_percent"] = ai_confidence_percent(item.get("ai_confidence"))
+    item["training_status_effective"] = effective_training_status(item)
     return item
 
 
@@ -581,6 +907,455 @@ def filter_options(metadata: dict[str, Any]) -> dict[str, list[str]]:
         "projects": [project.title for project in allowed.projects] or list(bindings["project"].options),
         "types": sorted(allowed.type_options or set(bindings["entry_type"].options), key=str.casefold),
         "priorities": sorted(allowed.priority_options or set(bindings["priority"].options), key=str.casefold),
+    }
+
+
+def training_filter_options(metadata: dict[str, Any], settings: Settings) -> dict[str, list[str]]:
+    base = filter_options(metadata)
+    return {
+        **base,
+        "training_statuses": list(TRAINING_STATUSES),
+        "scopes": list(TRAINING_SCOPE_OPTIONS),
+        "life_areas": training_life_area_options(metadata, settings),
+    }
+
+
+def training_form_options(metadata: dict[str, Any], settings: Settings) -> dict[str, list[str]]:
+    bindings: dict[str, FieldBinding] = metadata["bindings"]
+    base = filter_options(metadata)
+    entry_types = unique_preserve([*TRAINING_ENTRY_TYPE_OPTIONS, *base["types"]])
+    return {
+        "scopes": list(TRAINING_SCOPE_OPTIONS),
+        "projects": base["projects"],
+        "life_areas": training_life_area_options(metadata, settings),
+        "entry_types": entry_types,
+        "next_actions": list(TRAINING_NEXT_ACTION_OPTIONS),
+        "priorities": base["priorities"],
+        "tags": list(bindings["tags"].options),
+    }
+
+
+def training_life_area_options(metadata: dict[str, Any], settings: Settings) -> list[str]:
+    bindings: dict[str, FieldBinding] = metadata["bindings"]
+    return unique_preserve([*bindings["life_area"].options, *settings.voice_training_life_area_options])
+
+
+def unique_preserve(values: list[str] | tuple[str, ...]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        key = text.casefold()
+        if text and key not in seen:
+            result.append(text)
+            seen.add(key)
+    return result
+
+
+def training_record_binding_keys() -> tuple[str, ...]:
+    return (
+        "title",
+        "entry_type",
+        "project",
+        "priority",
+        "due_date",
+        "next_action",
+        "summary",
+        "clean_text",
+        "raw_text",
+        "tags",
+        "status",
+        "attachments",
+        "notes",
+        "external_id",
+        "source",
+        "ai_result_json",
+        "ai_confidence",
+        "training_status",
+        "scope",
+        "life_area",
+        "category",
+        "subcategory",
+        "training_confirmed_at",
+        "training_answers_json",
+    )
+
+
+def build_training_queue_formula(
+    query: dict[str, str],
+    bindings: dict[str, FieldBinding],
+    settings: Settings,
+    *,
+    include_cutoff: bool,
+) -> str:
+    parts = [
+        "OR("
+        + ",".join(
+            [
+                equals_formula(bindings["status"], "Processed"),
+                equals_formula(bindings["status"], "Needs Review"),
+                equals_formula(bindings["status"], "New"),
+                f"{{{bindings['status'].read_names[-1]}}} = ''",
+            ]
+        )
+        + ")",
+        "OR("
+        + ",".join(
+            [
+                f"{{{bindings['training_status'].read_names[-1]}}} = ''",
+                equals_formula(bindings["training_status"], "Pending"),
+                equals_formula(bindings["training_status"], "In Progress"),
+            ]
+        )
+        + ")",
+        "NOT(" + technical_formula(bindings) + ")",
+        display_data_formula(bindings),
+    ]
+    source = str(query.get("source") or "").strip()
+    if source:
+        parts.append(equals_formula(bindings["source"], source))
+    period_formula = period_filter_formula(str(query.get("period") or "").strip(), settings)
+    if period_formula:
+        parts.append(period_formula)
+    if include_cutoff and settings.voice_training_created_after_datetime is not None:
+        parts.append(
+            "IS_AFTER(CREATED_TIME(), "
+            f"DATETIME_PARSE('{_format_airtable_datetime(settings.voice_training_created_after_datetime)}'))"
+        )
+    return parts[0] if len(parts) == 1 else "AND(" + ",".join(parts) + ")"
+
+
+def display_data_formula(bindings: dict[str, FieldBinding]) -> str:
+    fields = [bindings[key] for key in ("title", "raw_text", "clean_text", "summary")]
+    return "OR(" + ",".join(f"LEN({{{binding.read_names[-1]}}} & '') > 0" for binding in fields) + ")"
+
+
+def training_queue_eligible(item: dict[str, Any], settings: Settings, *, include_cutoff: bool = True) -> bool:
+    if item.get("is_technical") or not has_display_data(item):
+        return False
+    if effective_training_status(item) not in {"Pending", "In Progress"}:
+        return False
+    status = str(item.get("status") or "")
+    if status and status not in {"Processed", "Needs Review", "New"}:
+        return False
+    cutoff = settings.voice_training_created_after_datetime
+    if include_cutoff and cutoff is not None:
+        created_at = item.get("created_at")
+        if not isinstance(created_at, datetime) or created_at <= cutoff:
+            return False
+    return True
+
+
+def training_query_matches(item: dict[str, Any], query: dict[str, str]) -> bool:
+    source = str(query.get("source") or "").strip()
+    if source and item.get("source") != source:
+        return False
+    period = str(query.get("period") or "").strip()
+    if period and not period_matches(item.get("created_at"), period):
+        return False
+    return True
+
+
+def period_matches(created_at: Any, period: str) -> bool:
+    if not isinstance(created_at, datetime):
+        return False
+    now = datetime.now(UTC)
+    if period == "today":
+        return created_at >= datetime.combine(now.date(), datetime.min.time(), tzinfo=UTC)
+    if period == "7d":
+        return created_at >= now - timedelta(days=7)
+    if period == "30d":
+        return created_at >= now - timedelta(days=30)
+    return True
+
+
+def effective_training_status(item: dict[str, Any]) -> str:
+    status = str(item.get("training_status") or "").strip()
+    return status if status in TRAINING_STATUSES else "Pending"
+
+
+def has_display_data(item: dict[str, Any]) -> bool:
+    return any(str(item.get(key) or "").strip() for key in ("title", "raw_text", "clean_text", "summary"))
+
+
+def training_needs_clarification(item: dict[str, Any]) -> bool:
+    if not item.get("scope"):
+        return True
+    if not item.get("entry_type"):
+        return True
+    if not item.get("next_action"):
+        return True
+    if item.get("ai_confidence_percent") is not None and item["ai_confidence_percent"] < 80:
+        return True
+    return False
+
+
+def infer_scope_from_record(record: dict[str, Any]) -> str:
+    if record.get("scope"):
+        return str(record.get("scope"))
+    if record.get("project"):
+        return "Рабочее"
+    if record.get("life_area"):
+        return "Личное"
+    return "Не уверен"
+
+
+def question_keys_for_training(scope: str) -> list[str]:
+    keys = ["scope"]
+    if scope in {"Рабочее", "Смешанное"}:
+        keys.append("project")
+    if scope in {"Личное", "Смешанное"}:
+        keys.append("life_area")
+    keys.extend(["entry_type", "next_action", "optional"])
+    return keys
+
+
+def ai_proposal_for_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scope": infer_scope_from_record(record),
+        "project": record.get("project") or "",
+        "entry_type": record.get("entry_type") or "",
+        "next_action": record.get("next_action") if record.get("next_action") in TRAINING_NEXT_ACTION_OPTIONS else "",
+        "priority": record.get("priority") or "",
+        "due_date": record.get("due_date") or "",
+        "tags": ",".join(record.get("tags") or []) if isinstance(record.get("tags"), list) else "",
+    }
+
+
+def validate_training_form(
+    form: dict[str, Any],
+    current: dict[str, Any],
+    metadata: dict[str, Any],
+    settings: Settings,
+    *,
+    status: str = "Completed",
+    applied_from: str = "",
+) -> tuple[dict[str, Any], dict[str, str]]:
+    errors: dict[str, str] = {}
+    for key in form:
+        if key not in TRAINING_FORM_KEYS:
+            errors[key] = "Unknown training field"
+    options = training_form_options(metadata, settings)
+    bindings: dict[str, FieldBinding] = metadata["bindings"]
+    scope = clean_form_text(form.get("scope"), limit=40)
+    if scope not in options["scopes"]:
+        errors["scope"] = "Выберите область"
+    project = clean_form_text(form.get("project"), limit=120)
+    if project and options["projects"] and project not in options["projects"]:
+        errors["project"] = "Недопустимый проект"
+    if scope == "Рабочее" and not project:
+        errors["project"] = "Выберите рабочий проект"
+    life_area = clean_form_text(form.get("life_area"), limit=120)
+    if life_area and options["life_areas"] and life_area not in options["life_areas"]:
+        errors["life_area"] = "Недопустимая сфера"
+    if scope == "Личное" and not life_area:
+        errors["life_area"] = "Выберите жизненную сферу"
+    entry_type = clean_form_text(form.get("entry_type"), limit=120)
+    if entry_type not in options["entry_types"]:
+        errors["entry_type"] = "Выберите тип записи"
+    next_action = clean_form_text(form.get("next_action"), limit=120)
+    if next_action not in options["next_actions"]:
+        errors["next_action"] = "Выберите следующее действие"
+    priority = clean_form_text(form.get("priority"), limit=120)
+    if priority and options["priorities"] and priority not in options["priorities"]:
+        errors["priority"] = "Недопустимый приоритет"
+    due_date = clean_form_text(form.get("due_date"), limit=20)
+    if due_date:
+        with contextlib.suppress(ValueError):
+            date.fromisoformat(due_date)
+        if not is_iso_date(due_date):
+            errors["due_date"] = "Дата должна быть в формате YYYY-MM-DD"
+    category = clean_form_text(form.get("category"), limit=120)
+    subcategory = clean_form_text(form.get("subcategory"), limit=120)
+    tags = clean_tags(form.get("tags"), allowed=options["tags"], errors=errors)
+    if errors:
+        return {}, errors
+
+    answers = {
+        "scope": scope,
+        "project": project,
+        "life_area": life_area,
+        "category": category,
+        "subcategory": subcategory,
+        "type": entry_type,
+        "next_action": next_action,
+        "priority": priority,
+        "due_date": due_date,
+        "tags": tags,
+    }
+    return fields_from_training_answers(
+        answers,
+        current,
+        metadata,
+        settings,
+        status=status,
+        applied_from=applied_from,
+    ), {}
+
+
+def is_iso_date(value: str) -> bool:
+    with contextlib.suppress(ValueError):
+        date.fromisoformat(value)
+        return True
+    return False
+
+
+def clean_tags(value: Any, *, allowed: list[str], errors: dict[str, str]) -> list[str]:
+    raw = str(value or "").replace(";", ",")
+    tags = unique_preserve([part.strip() for part in raw.split(",") if part.strip()])[:10]
+    if allowed:
+        invalid = [tag for tag in tags if tag not in allowed]
+        if invalid:
+            errors["tags"] = "Недопустимый тег"
+            return []
+    return tags
+
+
+def fields_from_training_answers(
+    answers: dict[str, Any],
+    current: dict[str, Any],
+    metadata: dict[str, Any],
+    settings: Settings,
+    *,
+    status: str,
+    applied_from: str = "",
+) -> dict[str, Any]:
+    bindings: dict[str, FieldBinding] = metadata["bindings"]
+    confirmed_at = datetime.now(UTC).isoformat()
+    fields: dict[str, Any] = {
+        bindings["training_status"].write_name: status,
+        bindings["training_confirmed_at"].write_name: confirmed_at,
+    }
+    mapping = {
+        "scope": "scope",
+        "life_area": "life_area",
+        "category": "category",
+        "subcategory": "subcategory",
+        "project": "project",
+        "type": "entry_type",
+        "next_action": "next_action",
+        "priority": "priority",
+        "due_date": "due_date",
+    }
+    for answer_key, binding_key in mapping.items():
+        value = answers.get(answer_key)
+        if value in ("", [], None):
+            value = None
+        add_if_changed(fields, bindings[binding_key], value, current.get(binding_key))
+    tags = answers.get("tags")
+    if tags:
+        add_if_changed(fields, bindings["tags"], tags, current.get("tags"))
+    payload = {
+        "schema_version": 1,
+        "record_id": current.get("id") or "",
+        "applied_from_record_id": applied_from,
+        "confirmed_at": confirmed_at,
+        "answers": {key: answers.get(key) for key in sorted(answers)},
+    }
+    fields[bindings["training_answers_json"].write_name] = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return fields
+
+
+def parse_training_answers(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        payload = value
+    elif isinstance(value, str) and value.strip():
+        with contextlib.suppress(json.JSONDecodeError):
+            payload = json.loads(value)
+        if not isinstance(payload, dict):
+            return {}
+    else:
+        return {}
+    answers = payload.get("answers") if isinstance(payload.get("answers"), dict) else payload
+    return dict(answers) if isinstance(answers, dict) else {}
+
+
+def record_text(item: dict[str, Any]) -> str:
+    return " ".join(str(item.get(key) or "") for key in ("title", "summary", "clean_text", "raw_text"))
+
+
+def token_set(text: str) -> set[str]:
+    return set(re.findall(r"[0-9A-Za-zА-Яа-яЁё]{3,}", text.casefold()))
+
+
+def record_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_tokens = token_set(record_text(left))
+    right_tokens = token_set(record_text(right))
+    if not left_tokens or not right_tokens:
+        overlap = 0.0
+    else:
+        overlap = len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+    bonuses = 0.0
+    for key in ("project", "entry_type", "source"):
+        if left.get(key) and left.get(key) == right.get(key):
+            bonuses += 0.08
+    left_tags = set(left.get("tags") or []) if isinstance(left.get("tags"), list) else set()
+    right_tags = set(right.get("tags") or []) if isinstance(right.get("tags"), list) else set()
+    if left_tags and right_tags:
+        bonuses += min(0.15, len(left_tags & right_tags) * 0.05)
+    return min(1.0, overlap + bonuses)
+
+
+def build_rule_proposals(records: list[dict[str, Any]], *, threshold: int) -> list[RuleProposal]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        if effective_training_status(record) != "Completed":
+            continue
+        answers = parse_training_answers(record.get("training_answers_json"))
+        if not answers:
+            continue
+        key_parts = [
+            str(answers.get("scope") or ""),
+            str(answers.get("project") or answers.get("life_area") or ""),
+            str(answers.get("category") or ""),
+            str(answers.get("subcategory") or ""),
+            str(answers.get("type") or ""),
+        ]
+        key = "\t".join(part.casefold() for part in key_parts)
+        grouped.setdefault(key, []).append(answers)
+    proposals: list[RuleProposal] = []
+    for answers_list in grouped.values():
+        if len(answers_list) < threshold:
+            continue
+        first = answers_list[0]
+        decision = {
+            key: first.get(key)
+            for key in ("project", "type", "priority", "next_action", "life_area", "category", "subcategory")
+            if first.get(key)
+        }
+        condition_parts = [
+            f"scope={first.get('scope') or '—'}",
+            f"project={first.get('project') or '—'}",
+            f"life_area={first.get('life_area') or '—'}",
+            f"category={first.get('category') or '—'}",
+            f"type={first.get('type') or '—'}",
+        ]
+        condition = "Dashboard training pattern: " + "; ".join(condition_parts)
+        label = " / ".join(
+            part
+            for part in (
+                first.get("project") or first.get("life_area"),
+                first.get("category"),
+                first.get("type"),
+            )
+            if part
+        ) or "classification pattern"
+        proposal_key = hashlib.sha256((condition + json.dumps(decision, ensure_ascii=False, sort_keys=True)).encode("utf-8")).hexdigest()[:16]
+        proposals.append(RuleProposal(key=proposal_key, label=label, condition=condition, decision=decision, count=len(answers_list)))
+    proposals.sort(key=lambda item: (-item.count, item.label.casefold()))
+    return proposals
+
+
+def normalize_taxonomy_record(record: dict[str, Any]) -> dict[str, Any]:
+    fields = record.get("fields") or {}
+    return {
+        "id": str(record.get("id") or ""),
+        "name": fields.get("Название") or "Без названия",
+        "type": fields.get("Тип") or "",
+        "parent": fields.get("Родитель") or "",
+        "active": bool(fields.get("Активно")),
+        "uses": fields.get("Количество применений"),
+        "last_used": fields.get("Дата последнего применения") or "",
     }
 
 

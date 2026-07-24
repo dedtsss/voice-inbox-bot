@@ -211,6 +211,21 @@ DASHBOARD_WRITE_RATE_LIMIT_PER_MINUTE=30
 DASHBOARD_AIRTABLE_VIEW=
 DASHBOARD_CREATED_TIME_FIELD=
 DASHBOARD_ATTACHMENT_TIMEOUT_SECONDS=30
+VOICE_FIELD_TRAINING_STATUS=Training Status
+VOICE_FIELD_SCOPE=Scope
+VOICE_FIELD_LIFE_AREA=Life Area
+VOICE_FIELD_CATEGORY=Category
+VOICE_FIELD_SUBCATEGORY=Subcategory
+VOICE_FIELD_TRAINING_CONFIRMED_AT=Training Confirmed At
+VOICE_FIELD_TRAINING_ANSWERS_JSON=Training Answers JSON
+VOICE_TRAINING_CREATED_AFTER=2026-07-24T00:00:00Z
+VOICE_TRAINING_QUEUE_LIMIT=50
+VOICE_TRAINING_BACKLOG_LIMIT=20
+VOICE_TRAINING_SIMILARITY_LIMIT=5
+VOICE_TRAINING_BATCH_LIMIT=20
+VOICE_TRAINING_RULE_THRESHOLD=3
+VOICE_TRAINING_LIFE_AREAS=Дом,Семья,Здоровье,Финансы,Покупки,Документы,Обучение,Идеи,Отдых,Другое
+VOICE_TRAINING_TAXONOMY_TABLE_NAME=Таксономия
 ```
 
 `DASHBOARD_CSRF_SECRET` обязателен для запуска dashboard и должен быть случайным значением не короче 32 байт. В production храните его через Bruce Secrets Contract или другой фактически принятый secret storage. Не используйте `MOBILE_INBOX_TOKEN` для dashboard.
@@ -251,6 +266,7 @@ Production-проверка должна подтверждать только �
 - `Needs Review` — карточки для проверки и переход к форме исправления.
 - `New / Processing` — возраст записи: до 5 минут нормальное состояние, 5-15 минут задержка, больше 15 минут требует внимания.
 - `Processed` — компактный список обработанных записей.
+- `Разбор и обучение` — отдельная очередь классификационного обучения с мастером, похожими записями, правилами и структурой.
 - `Правила` — безопасный просмотр `Правила обработки`; если есть поле `Активно`, правило можно включить или выключить.
 - `Технические` — фильтр по `smoke`, `canary`, `production test`, `TG-SMOKE`, `dashboard-canary`. Такие записи не удаляются автоматически.
 
@@ -286,6 +302,53 @@ Dashboard не создаёт новый механизм обучения. Кн
 
 Дальше один существующий voice processor в своём обычном цикле подбирает pending corrections, сравнивает текущие поля с `AI результат JSON`, создаёт правило в `Правила обработки`, ставит `Обучение учтено = true` и очищает `Обучить на исправлении`.
 
+### Разбор и обучение
+
+`Разбор и обучение` находится на `/learning` и не заменяет `Needs Review`.
+
+- `Needs Review` проверяет качество AI: распознавание, сумму, срок, проект, тип, next action, ошибку и низкую уверенность.
+- `Разбор и обучение` подтверждает пользовательскую структуру даже для корректно распознанных записей: scope, рабочий проект или личную сферу, тип, действие, category, subcategory, priority, due date и tags.
+
+Очередь обучения берёт реальные записи `Processed`, `Needs Review` и безопасные `New`, если они не technical/smoke/canary, имеют текст для показа и не имеют завершённого `Training Status`. Legacy blank `Training Status` трактуется как `Pending`, но только внутри безопасной выборки.
+
+Чтобы старый архив не попал в очередь массово, действует `VOICE_TRAINING_CREATED_AFTER`. По умолчанию это `2026-07-24T00:00:00Z`. Ручной backlog включается фильтром на странице и ограничивается `VOICE_TRAINING_BACKLOG_LIMIT`.
+
+Training statuses:
+
+- `Pending` — запись ожидает разбора или legacy blank внутри cutoff.
+- `In Progress` — пользователь начал сессию через POST-кнопку.
+- `Completed` — ответы сохранены.
+- `Skipped` — запись пропущена.
+- `Auto Confirmed` — зарезервировано для будущей безопасной автоклассификации.
+
+Мастер показывает одну запись за раз, media отдаёт только через существующий `/records/{record_id}/attachments/{index}` proxy. Scope управляет адаптивной веткой: `Рабочее` показывает project, `Личное` показывает life area, `Смешанное` показывает оба блока. Список проектов берётся из Airtable metadata/Projects OS, life areas берутся из поля `Life Area` и `VOICE_TRAINING_LIFE_AREAS`, поэтому набор расширяется без изменения кода.
+
+Сохранение пишет только allowlisted поля:
+
+```text
+Training Status
+Scope
+Life Area
+Category
+Subcategory
+Training Confirmed At
+Training Answers JSON
+Проект
+Тип
+Приоритет
+Срок
+Следующее действие
+Теги
+```
+
+`Training Answers JSON` содержит только schema version, record id, optional applied-from record id, timestamp и структурированные ответы. Тексты заметок, attachment URL и полный `AI результат JSON` туда не дублируются.
+
+После сохранения похожие записи предлагаются через локальный token overlap/Jaccard с небольшими бонусами за совпадение project/type/source/tags. Batch apply требует явного checkbox выбора, максимум `VOICE_TRAINING_BATCH_LIMIT`, и меняет только выбранные record IDs.
+
+Правило processor не создаётся после одного примера. После `VOICE_TRAINING_RULE_THRESHOLD` одинаковых подтверждений вкладка `Правила` предлагает rule candidate. Создание требует явного POST и использует существующую таблицу `Правила обработки`; processor продолжает применять общий correction-learning механизм.
+
+Вкладка `Структура` показывает рабочие проекты, личные сферы, категории и подкатегории по безопасной ограниченной выборке. Schema ensure идемпотентно создаёт таблицу `Таксономия` с полями `Название`, `Тип`, `Родитель`, `Активно`, `Количество применений`, `Дата последнего применения`; сложный древовидный редактор в MVP не реализован.
+
 ### Безопасность
 
 Dashboard включает:
@@ -311,7 +374,7 @@ python -m pytest tests/test_dashboard.py
 python -m pytest
 ```
 
-Покрытие включает health endpoint, списки, detail card, пустую таблицу, Airtable error, pagination, filters, search, зависшие записи, валидацию, запрет неизвестных полей, CSRF, Origin/Referer, Host validation, XSS escaping, partial update, `Сохранить`, `Сохранить и обучить`, правила и security headers.
+Покрытие включает health endpoint, списки, detail card, пустую таблицу, Airtable error, pagination, filters, search, зависшие записи, валидацию, запрет неизвестных полей, CSRF, Origin/Referer, Host validation, XSS escaping, partial update, `Сохранить`, `Сохранить и обучить`, правила, security headers, training queue, cutoff/backlog, adaptive questions, complete/skip, batch apply, similarity, explicit rule creation и рендер queue/session/rules/structure.
 
 ### Диагностика зависших записей
 
@@ -343,6 +406,13 @@ python -m pytest
 - `Google Drive` — URL папки входящей записи.
 - `Источник` — `Android` или `Telegram`.
 - `Ошибка обработки` — последняя техническая ошибка.
+- `Training Status` — статус разбора.
+- `Scope` — личное, рабочее, смешанное или не уверен.
+- `Life Area` — расширяемая личная сфера.
+- `Category` — категория разбора.
+- `Subcategory` — подкатегория.
+- `Training Confirmed At` — UTC timestamp подтверждения.
+- `Training Answers JSON` — компактные структурированные ответы мастера.
 
 Если Airtable token имеет schema permissions, поля можно создать так:
 
@@ -350,7 +420,7 @@ python -m pytest
 PYTHONPATH=src python scripts/ensure_airtable_fields.py
 ```
 
-Этот script idempotent: он добавляет metadata поля Drive ingest, feedback поля processor, choice `Processing` в `Статус обработки` и таблицу `Правила обработки`, если они ещё отсутствуют.
+Этот script idempotent: он добавляет metadata поля Drive ingest, feedback поля processor, choice `Processing` в `Статус обработки`, таблицу `Правила обработки`, training-поля, training select choices, минимальные варианты `Тип` и таблицу `Таксономия`, если они ещё отсутствуют.
 
 ## Multimodal Voice Processor
 

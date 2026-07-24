@@ -13,6 +13,19 @@ from app.config import Settings
 
 CHECKBOX_FIELD_OPTIONS = {"icon": "check", "color": "greenBright"}
 DEFAULT_SELECT_CHOICE_COLOR = "blueLight2"
+TRAINING_STATUS_CHOICES = ["Pending", "In Progress", "Completed", "Skipped", "Auto Confirmed"]
+TRAINING_SCOPE_CHOICES = ["Личное", "Рабочее", "Смешанное", "Не уверен"]
+TRAINING_TYPE_CHOICES = [
+    "Задача",
+    "Заметка",
+    "Идея",
+    "Напоминание",
+    "Документ",
+    "Финансовая запись",
+    "Контакт",
+    "Событие",
+    "Другое",
+]
 
 
 class AirtableError(RuntimeError):
@@ -632,6 +645,57 @@ class AirtableClient:
             "created_rules_table": created_table,
         }
 
+    def ensure_voice_training_schema(self) -> dict[str, Any]:
+        created_fields = self._ensure_fields(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            [
+                select_field(self.settings.voice_field_training_status, TRAINING_STATUS_CHOICES),
+                select_field(self.settings.voice_field_scope, TRAINING_SCOPE_CHOICES),
+                select_field(self.settings.voice_field_life_area, self.settings.voice_training_life_area_options),
+                {"name": self.settings.voice_field_category, "type": "singleLineText"},
+                {"name": self.settings.voice_field_subcategory, "type": "singleLineText"},
+                date_time_field(self.settings.voice_field_training_confirmed_at),
+                {"name": self.settings.voice_field_training_answers_json, "type": "multilineText"},
+            ],
+        )
+        added_status_choices = self.ensure_select_field_choices(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            self.settings.voice_field_training_status,
+            TRAINING_STATUS_CHOICES,
+        )
+        added_scope_choices = self.ensure_select_field_choices(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            self.settings.voice_field_scope,
+            TRAINING_SCOPE_CHOICES,
+        )
+        added_life_area_choices = self.ensure_select_field_choices(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            self.settings.voice_field_life_area,
+            self.settings.voice_training_life_area_options,
+        )
+        added_type_choices = self.ensure_select_field_choices(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            self.settings.voice_field_type,
+            TRAINING_TYPE_CHOICES,
+            allow_typecast_record_fallback=True,
+        )
+        taxonomy_table_id, created_taxonomy_table = self._ensure_training_taxonomy_table()
+        return {
+            "created_fields": created_fields,
+            "added_status_choices": added_status_choices,
+            "added_scope_choices": added_scope_choices,
+            "added_life_area_choices": added_life_area_choices,
+            "added_type_choices": added_type_choices,
+            "taxonomy_table_name": self.settings.voice_training_taxonomy_table_name,
+            "taxonomy_table_id": taxonomy_table_id,
+            "created_taxonomy_table": created_taxonomy_table,
+        }
+
     def ensure_select_field_choices(
         self,
         base_id: str,
@@ -788,6 +852,55 @@ class AirtableClient:
             raise AirtableError("Airtable processing rules table create did not return id")
         return table_id, True
 
+    def taxonomy_table_id(self) -> str | None:
+        table = self.find_table_metadata(
+            self.settings.voice_inbox_base_id,
+            table_name=self.settings.voice_training_taxonomy_table_name,
+        )
+        if not table:
+            return None
+        table_id = table.get("id")
+        return str(table_id) if table_id else None
+
+    def list_taxonomy_records(self, *, page_size: int = 100) -> list[dict]:
+        table_id = self.taxonomy_table_id()
+        if not table_id:
+            return []
+        return self.list_records(
+            self.settings.voice_inbox_base_id,
+            table_id,
+            params=[("pageSize", str(max(1, min(page_size, 100)))), ("maxRecords", str(max(1, page_size)))],
+            max_records=max(1, page_size),
+        )
+
+    def _ensure_training_taxonomy_table(self) -> tuple[str, bool]:
+        table = self.find_table_metadata(
+            self.settings.voice_inbox_base_id,
+            table_name=self.settings.voice_training_taxonomy_table_name,
+        )
+        if table:
+            table_id = str(table.get("id") or "")
+            if not table_id:
+                raise AirtableError("Airtable taxonomy table has no id")
+            self._ensure_fields(self.settings.voice_inbox_base_id, table_id, taxonomy_fields(primary=False))
+            return table_id, False
+
+        create_response = self.session.post(
+            self._meta_tables_url(self.settings.voice_inbox_base_id),
+            json={
+                "name": self.settings.voice_training_taxonomy_table_name,
+                "fields": taxonomy_fields(primary=True),
+            },
+            timeout=30,
+        )
+        if create_response.status_code >= 400:
+            raise AirtableError(f"Airtable metadata {create_response.status_code}: {create_response.text[:500]}")
+        payload = create_response.json()
+        table_id = str(payload.get("id") or "")
+        if not table_id:
+            raise AirtableError("Airtable taxonomy table create did not return id")
+        return table_id, True
+
     def _voice_fields(
         self,
         structured: dict,
@@ -903,6 +1016,26 @@ def checkbox_field(name: str) -> dict[str, Any]:
     return {"name": name, "type": "checkbox", "options": dict(CHECKBOX_FIELD_OPTIONS)}
 
 
+def select_field(name: str, choices: list[str]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "type": "singleSelect",
+        "options": {"choices": [{"name": choice, "color": DEFAULT_SELECT_CHOICE_COLOR} for choice in choices if choice]},
+    }
+
+
+def date_time_field(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "type": "dateTime",
+        "options": {
+            "dateFormat": {"name": "iso"},
+            "timeFormat": {"name": "24hour"},
+            "timeZone": "utc",
+        },
+    }
+
+
 def processing_rule_fields(*, primary: bool) -> list[dict[str, Any]]:
     fields = [
         {"name": "Правило", "type": "singleLineText"},
@@ -938,6 +1071,31 @@ def processing_rule_fields(*, primary: bool) -> list[dict[str, Any]]:
                 "timeZone": "utc",
             },
         },
+    ]
+    if primary:
+        return fields
+    return fields[1:]
+
+
+def taxonomy_fields(*, primary: bool) -> list[dict[str, Any]]:
+    fields = [
+        {"name": "Название", "type": "singleLineText"},
+        {
+            "name": "Тип",
+            "type": "singleSelect",
+            "options": {
+                "choices": [
+                    {"name": "проект", "color": DEFAULT_SELECT_CHOICE_COLOR},
+                    {"name": "личная сфера", "color": DEFAULT_SELECT_CHOICE_COLOR},
+                    {"name": "категория", "color": DEFAULT_SELECT_CHOICE_COLOR},
+                    {"name": "подкатегория", "color": DEFAULT_SELECT_CHOICE_COLOR},
+                ]
+            },
+        },
+        {"name": "Родитель", "type": "singleLineText"},
+        checkbox_field("Активно"),
+        {"name": "Количество применений", "type": "number", "options": {"precision": 0}},
+        date_time_field("Дата последнего применения"),
     ]
     if primary:
         return fields

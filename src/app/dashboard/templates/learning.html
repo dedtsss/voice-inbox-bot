@@ -1,105 +1,487 @@
 {% extends "base.html" %}
 {% import "partials/icons.html" as icons %}
 {% import "partials/record_macros.html" as records %}
-{% block title %}Обучение processor{% endblock %}
+{% block title %}Разбор и обучение{% endblock %}
 {% block content %}
   <section class="page-hero compact">
     <div>
-      <span class="eyebrow">{{ icons.icon("learning") }}Correction learning</span>
-      <h1>Обучение</h1>
-      {% if data.active_supported %}
-        <p class="muted">Правила читаются из Airtable, активность меняется через существующее поле Активно.</p>
-      {% else %}
-        <p class="muted">В текущей схеме нет поля активности, поэтому правила отображаются без переключателя.</p>
-      {% endif %}
+      <span class="eyebrow">{{ icons.icon("learning") }}Training queue</span>
+      <h1>Разбор и обучение</h1>
+      <p class="muted">Классификация отделена от проверки AI и сохраняется в отдельный Training Status.</p>
     </div>
+    <form method="post" action="/learning/session/start" class="hero-actions">
+      {{ csrf_input(request)|safe }}
+      {% if data.queue.filters.source %}<input type="hidden" name="source" value="{{ data.queue.filters.source }}">{% endif %}
+      {% if data.queue.filters.period %}<input type="hidden" name="period" value="{{ data.queue.filters.period }}">{% endif %}
+      {% if data.queue.backlog %}<input type="hidden" name="backlog" value="1">{% endif %}
+      <button class="button primary" type="submit">{{ icons.icon("arrow") }}Начать разбор</button>
+      <a class="button ghost" href="/learning/session">Продолжить</a>
+    </form>
   </section>
 
-  <section class="metric-grid">
+  <section class="metric-grid xl">
     <a class="metric" href="/learning">
-      <span class="metric-label">Всего правил</span>
-      <strong>{{ data.cards.rules_total if data.cards and data.cards.rules_total is not none else data.rules|length }}</strong>
-      <small>Processing rules</small>
+      <span class="metric-label">Ожидает разбора</span>
+      <strong>{{ data.cards.training_queue }}</strong>
+      <small>Pending / In Progress</small>
     </a>
-    <a class="metric accent-green" href="/learning">
-      <span class="metric-label">Активные правила</span>
-      <strong>{{ data.cards.rules_active if data.cards and data.cards.rules_active is not none else data.rules|selectattr("active")|list|length }}</strong>
-      <small>Участвуют в processor</small>
+    <a class="metric accent-green" href="/learning?tab=queue&period=today">
+      <span class="metric-label">Подтверждено сегодня</span>
+      <strong>{{ data.cards.training_completed_today }}</strong>
+      <small>Completed</small>
     </a>
-    <a class="metric urgent" href="/records">
-      <span class="metric-label">Ожидают учета</span>
-      <strong>{{ data.cards.training_pending if data.cards else "—" }}</strong>
-      <small>Save and train</small>
+    <a class="metric accent-blue" href="/learning?tab=queue">
+      <span class="metric-label">Auto Confirmed</span>
+      <strong>{{ data.cards.training_auto_confirmed }}</strong>
+      <small>Без ручного мастера</small>
     </a>
-    <a class="metric accent-blue" href="/records">
-      <span class="metric-label">Учтено</span>
-      <strong>{{ data.cards.training_applied if data.cards else "—" }}</strong>
-      <small>Correction applied</small>
+    <a class="metric urgent" href="/learning?tab=queue">
+      <span class="metric-label">Требует уточнения</span>
+      <strong>{{ data.cards.training_needs_clarification }}</strong>
+      <small>Нет ключевых ответов</small>
+    </a>
+    <a class="metric accent-cyan" href="/learning?tab=rules">
+      <span class="metric-label">Правил предложено</span>
+      <strong>{{ data.proposed_rules|length }}</strong>
+      <small>После повторов</small>
     </a>
   </section>
 
-  <section class="dashboard-grid">
-    <article class="panel span-8">
-      <div class="panel-head">
-        <div>
-          <h2>Правила</h2>
-          <p class="muted">Список существующих правил correction learning.</p>
-        </div>
-      </div>
-      <div class="rules-grid">
-        {% for rule in data.rules %}
-          <article class="rule-card">
-            <div class="rule-card-head">
-              <div>
-                <h3>{{ rule.name }}</h3>
-                <div class="review-meta">
-                  <span>{{ rule.area or "Без области" }}</span>
-                  <span>{{ rule.project or "Без проекта" }}</span>
-                  <span>{{ rule.entry_type or "Без типа" }}</span>
-                </div>
-              </div>
-              <span class="status-pill {% if rule.active %}status-processed{% else %}status-unknown{% endif %}">{{ "Активно" if rule.active else "Выключено" }}</span>
+  <nav class="view-switch learning-tabs" aria-label="Разделы обучения">
+    <a href="/learning?tab=queue" class="{% if data.active_tab == 'queue' %}active{% endif %}">Очередь</a>
+    <a href="/learning/session" class="{% if data.active_tab == 'session' %}active{% endif %}">Сессия</a>
+    <a href="/learning?tab=rules" class="{% if data.active_tab == 'rules' %}active{% endif %}">Правила</a>
+    <a href="/learning?tab=structure" class="{% if data.active_tab == 'structure' %}active{% endif %}">Структура</a>
+  </nav>
+
+  {% if data.active_tab == 'session' and data.session is defined %}
+    {% set session = data.session %}
+    {% set record = session.record %}
+    <section class="learning-session">
+      <article class="panel learning-context">
+        <div class="panel-head">
+          <div>
+            <h2>{{ record.title }}</h2>
+            <div class="review-meta">
+              <span>{{ record.id }}</span>
+              <span>{{ record.source or "—" }}</span>
+              <span>{{ record.created_local }}</span>
+              <span>{{ record.training_status_effective }}</span>
             </div>
-            <dl class="meta-grid compact-meta">
-              <div><dt>Использований</dt><dd>{{ rule.uses if rule.uses is not none else "—" }}</dd></div>
-              <div><dt>Последнее</dt><dd>{{ rule.last_used or "—" }}</dd></div>
-            </dl>
-            <details>
-              <summary>Условие и решение</summary>
-              <pre class="text-block">{{ rule.condition or "—" }}</pre>
-              <pre class="json-block">{{ rule.decision or "—" }}</pre>
-            </details>
-            {% if data.active_supported %}
-              <form method="post" action="/rules/{{ rule.id }}/active">
-                {{ csrf_input(request)|safe }}
-                <input type="hidden" name="active" value="{% if rule.active %}0{% else %}1{% endif %}">
-                <button class="button ghost compact" type="submit">{% if rule.active %}Выключить{% else %}Включить{% endif %}</button>
-              </form>
-            {% endif %}
-          </article>
-        {% else %}
-          <div class="empty-state inline">
-            {{ icons.icon("learning") }}
-            <strong>Правил пока нет.</strong>
           </div>
-        {% endfor %}
-      </div>
-    </article>
-
-    <aside class="panel span-4">
-      <div class="panel-head">
-        <div>
-          <h2>Последние обучающие случаи</h2>
-          <p class="muted">Записи с correction flags или комментарием.</p>
+          <span class="status-pill status-processing">{{ session.progress.position }} / {{ session.progress.total }}</span>
         </div>
-      </div>
-      <div class="mini-record-list">
-        {% for record in data.recent_cases %}
-          {{ records.mini_record(record) }}
-        {% else %}
-          <p class="empty">Недавних обучающих случаев в выборке нет.</p>
-        {% endfor %}
-      </div>
-    </aside>
-  </section>
+
+        <progress class="progress-track" value="{{ session.progress.position }}" max="{{ session.progress.total }}" aria-label="Прогресс"></progress>
+
+        <div class="compare-grid">
+          <div>
+            <h3>Исходная фраза</h3>
+            <pre class="text-block">{{ record.raw_text or "—" }}</pre>
+          </div>
+          <div>
+            <h3>Очищенный текст</h3>
+            <pre class="text-block">{{ record.clean_text or "—" }}</pre>
+          </div>
+        </div>
+        <div class="summary-panel">
+          <h3>AI summary</h3>
+          <p>{{ record.summary or "—" }}</p>
+          <div class="tag-list">
+            {% if record.project %}<span class="tag">Проект: {{ record.project }}</span>{% endif %}
+            {% if record.entry_type %}<span class="tag">Тип: {{ record.entry_type }}</span>{% endif %}
+            {% if record.ai_confidence_percent is not none %}<span class="tag">AI {{ record.ai_confidence_percent }}%</span>{% endif %}
+          </div>
+        </div>
+
+        {% if record.attachments %}
+          <div class="media-grid">
+            {% for attachment in record.attachments %}
+              <figure class="media-item">
+                <div class="media-preview">
+                  {% if attachment.kind == "image" %}
+                    <img src="/records/{{ record.id }}/attachments/{{ loop.index0 }}" alt="{{ attachment.filename }}">
+                  {% elif attachment.kind == "audio" %}
+                    <audio controls src="/records/{{ record.id }}/attachments/{{ loop.index0 }}"></audio>
+                  {% elif attachment.kind == "video" %}
+                    <video controls src="/records/{{ record.id }}/attachments/{{ loop.index0 }}"></video>
+                  {% else %}
+                    <a class="button ghost" href="/records/{{ record.id }}/attachments/{{ loop.index0 }}">{{ icons.icon("file") }}Открыть файл</a>
+                  {% endif %}
+                </div>
+                <figcaption>{{ attachment.filename }}</figcaption>
+              </figure>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </article>
+
+      <aside class="panel learning-wizard sticky-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Мастер</h2>
+            <p class="muted">Обычная запись проходится через короткие подтверждения.</p>
+          </div>
+        </div>
+
+        {% if session.ai_proposal.project or session.ai_proposal.entry_type or session.ai_proposal.next_action %}
+          <div class="quick-confirm">
+            <strong>AI-предложение</strong>
+            <div class="tag-list">
+              <span class="tag">{{ session.ai_proposal.scope }}</span>
+              {% if session.ai_proposal.project %}<span class="tag">{{ session.ai_proposal.project }}</span>{% endif %}
+              {% if session.ai_proposal.entry_type %}<span class="tag">{{ session.ai_proposal.entry_type }}</span>{% endif %}
+              {% if session.ai_proposal.next_action %}<span class="tag">{{ session.ai_proposal.next_action }}</span>{% endif %}
+            </div>
+          </div>
+        {% endif %}
+
+        <form method="post" action="/learning/session/{{ record.id }}/complete" class="training-form" data-training-form>
+          {{ csrf_input(request)|safe }}
+          <fieldset>
+            <legend>1. Это личное, рабочее или смешанное?</legend>
+            <div class="choice-grid">
+              {% for scope in session.options.scopes %}
+                {% set checked_scope = record.scope or session.ai_proposal.scope %}
+                <label class="choice-card">
+                  <input type="radio" name="scope" value="{{ scope }}" {% if checked_scope == scope %}checked{% endif %}>
+                  <span>{{ scope }}</span>
+                </label>
+              {% endfor %}
+            </div>
+            {% if errors and errors.scope %}<p class="field-error">{{ errors.scope }}</p>{% endif %}
+          </fieldset>
+
+          <label data-scope-dependent="work">
+            <span>2. Рабочий проект</span>
+            <select name="project">
+              <option value="">Не выбран</option>
+              {% for project in session.options.projects %}
+                <option value="{{ project }}" {% if (record.project or session.ai_proposal.project) == project %}selected{% endif %}>{{ project }}</option>
+              {% endfor %}
+            </select>
+            {% if errors and errors.project %}<span class="field-error">{{ errors.project }}</span>{% endif %}
+          </label>
+
+          <label data-scope-dependent="personal">
+            <span>3. Личная сфера</span>
+            <select name="life_area">
+              <option value="">Не выбрана</option>
+              {% for area in session.options.life_areas %}
+                <option value="{{ area }}" {% if record.life_area == area %}selected{% endif %}>{{ area }}</option>
+              {% endfor %}
+            </select>
+            {% if errors and errors.life_area %}<span class="field-error">{{ errors.life_area }}</span>{% endif %}
+          </label>
+
+          <label>
+            <span>4. Тип записи</span>
+            <select name="entry_type" required>
+              {% for entry_type in session.options.entry_types %}
+                <option value="{{ entry_type }}" {% if (record.entry_type or session.ai_proposal.entry_type) == entry_type %}selected{% endif %}>{{ entry_type }}</option>
+              {% endfor %}
+            </select>
+            {% if errors and errors.entry_type %}<span class="field-error">{{ errors.entry_type }}</span>{% endif %}
+          </label>
+
+          <label>
+            <span>5. Что нужно сделать?</span>
+            <select name="next_action" required>
+              {% for action in session.options.next_actions %}
+                <option value="{{ action }}" {% if session.ai_proposal.next_action == action %}selected{% endif %}>{{ action }}</option>
+              {% endfor %}
+            </select>
+            {% if errors and errors.next_action %}<span class="field-error">{{ errors.next_action }}</span>{% endif %}
+          </label>
+
+          <div class="optional-grid">
+            <label>
+              <span>Категория</span>
+              <input name="category" value="{{ record.category or '' }}" maxlength="120" autocomplete="off">
+            </label>
+            <label>
+              <span>Подкатегория</span>
+              <input name="subcategory" value="{{ record.subcategory or '' }}" maxlength="120" autocomplete="off">
+            </label>
+            <label>
+              <span>Приоритет</span>
+              <select name="priority">
+                <option value="">Не выбран</option>
+                {% for priority in session.options.priorities %}
+                  <option value="{{ priority }}" {% if (record.priority or session.ai_proposal.priority) == priority %}selected{% endif %}>{{ priority }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              <span>Срок</span>
+              <input name="due_date" type="date" value="{{ record.due_date or session.ai_proposal.due_date or '' }}">
+            </label>
+            <label class="span-2">
+              <span>Теги через запятую</span>
+              <input name="tags" value="{% if record.tags is iterable and record.tags is not string %}{{ record.tags|join(', ') }}{% endif %}" autocomplete="off">
+            </label>
+          </div>
+
+          <div class="sticky-actions">
+            {% if session.progress.previous_id %}
+              <a class="button ghost" href="/learning/session/{{ session.progress.previous_id }}">Назад</a>
+            {% endif %}
+            <button class="button primary" type="submit">Сохранить и дальше</button>
+          </div>
+        </form>
+
+        <form method="post" action="/learning/session/{{ record.id }}/skip" class="inline-form">
+          {{ csrf_input(request)|safe }}
+          <button class="button ghost" type="submit">Пропустить</button>
+          <a class="button ghost" href="/learning?tab=queue">Завершить позже</a>
+        </form>
+      </aside>
+    </section>
+
+    {% if session.similar_records %}
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Похожие записи</h2>
+            <p class="muted">Пакетное применение выполняется только для выбранных записей.</p>
+          </div>
+        </div>
+        <form method="post" action="/learning/batch-apply" class="similar-list">
+          {{ csrf_input(request)|safe }}
+          <input type="hidden" name="source_record_id" value="{{ record.id }}">
+          {% for similar in session.similar_records %}
+            <label class="similar-row">
+              <input type="checkbox" name="record_ids" value="{{ similar.id }}">
+              <span>
+                <strong>{{ similar.title }}</strong>
+                <small>{{ similar.source or "—" }} · {{ similar.created_local }} · {{ similar.similarity_percent }}%</small>
+                <em>{{ similar.summary or similar.clean_text or similar.raw_text or "—" }}</em>
+              </span>
+            </label>
+          {% endfor %}
+          <div class="form-actions">
+            <button class="button train" type="submit">Применить к выбранным</button>
+            <a class="button ghost" href="/learning/session/{{ record.id }}">Разобрать отдельно</a>
+          </div>
+        </form>
+      </section>
+    {% endif %}
+  {% elif data.active_tab == 'session' %}
+    <section class="empty-state">
+      {{ icons.icon("learning") }}
+      <strong>Очередь пуста.</strong>
+      <span>Новые записи после cutoff появятся здесь автоматически.</span>
+    </section>
+  {% endif %}
+
+  {% if data.active_tab == 'queue' %}
+    <section class="toolbar-card">
+      <form class="filters" method="get" action="/learning">
+        <input type="hidden" name="tab" value="queue">
+        <label>
+          <span>Источник</span>
+          <select name="source">
+            <option value="">Все</option>
+            {% for source in data.queue.options.sources %}
+              <option value="{{ source }}" {% if data.queue.filters.source == source %}selected{% endif %}>{{ source }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Период</span>
+          <select name="period">
+            <option value="">После cutoff</option>
+            <option value="today" {% if data.queue.filters.period == 'today' %}selected{% endif %}>Сегодня</option>
+            <option value="7d" {% if data.queue.filters.period == '7d' %}selected{% endif %}>7 дней</option>
+            <option value="30d" {% if data.queue.filters.period == '30d' %}selected{% endif %}>30 дней</option>
+          </select>
+        </label>
+        <label>
+          <span>Backlog</span>
+          <select name="backlog">
+            <option value="">Не включать архив</option>
+            <option value="1" {% if data.queue.backlog %}selected{% endif %}>Ограниченный backlog</option>
+          </select>
+        </label>
+        <div class="filter-actions">
+          <button class="button primary" type="submit">Фильтр</button>
+          <a class="button ghost" href="/learning">Сброс</a>
+        </div>
+      </form>
+      <p class="muted footnote">Cutoff очереди: {{ data.cutoff or "не задан" }}. Legacy blank Training Status считается Pending только внутри безопасной выборки.</p>
+    </section>
+
+    <section class="record-list">
+      {% for record in data.queue.records %}
+        <article class="record-card">
+          <div class="record-card-head">
+            <span class="record-type-icon">{{ records.source_icon(record.source) }}</span>
+            <div class="record-title-block">
+              <a class="record-title" href="/learning/session/{{ record.id }}">{{ record.title }}</a>
+              <span class="record-id">{{ record.id }} · {{ record.training_status_effective }}</span>
+            </div>
+            {{ records.status_pill(record.status) }}
+          </div>
+          <p class="record-summary">{{ record.summary or record.clean_text or record.raw_text or "Нет текста" }}</p>
+          <dl class="meta-grid compact-meta">
+            <div><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
+            <div><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
+            <div><dt>Сфера</dt><dd>{{ record.life_area or "—" }}</dd></div>
+            <div><dt>Тип</dt><dd>{{ record.entry_type or "—" }}</dd></div>
+            <div><dt>Создано</dt><dd>{{ record.created_local }}</dd></div>
+          </dl>
+          <div class="card-actions">
+            <a class="button compact primary" href="/learning/session/{{ record.id }}">Разобрать</a>
+            <a class="icon-link" href="/records/{{ record.id }}">{{ icons.icon("arrow") }}<span>Детали</span></a>
+          </div>
+        </article>
+      {% else %}
+        <div class="empty-state">
+          {{ icons.icon("learning") }}
+          <strong>Записей для разбора нет.</strong>
+        </div>
+      {% endfor %}
+    </section>
+  {% endif %}
+
+  {% if data.active_tab == 'rules' %}
+    <section class="dashboard-grid">
+      <article class="panel span-6">
+        <div class="panel-head">
+          <div>
+            <h2>Предложения правил</h2>
+            <p class="muted">Появляются после нескольких одинаковых подтверждений.</p>
+          </div>
+        </div>
+        <div class="rules-grid">
+          {% for proposal in data.proposed_rules %}
+            <article class="rule-card">
+              <div class="rule-card-head">
+                <div>
+                  <h3>{{ proposal.label }}</h3>
+                  <div class="review-meta"><span>{{ proposal.count }} подтверждения</span></div>
+                </div>
+                <span class="status-pill status-review">Предложено</span>
+              </div>
+              <pre class="text-block">{{ proposal.condition }}</pre>
+              <pre class="json-block">{{ proposal.decision_json }}</pre>
+              <form method="post" action="/learning/rules/create">
+                {{ csrf_input(request)|safe }}
+                <input type="hidden" name="proposal_key" value="{{ proposal.key }}">
+                <button class="button train compact" type="submit">Создать правило</button>
+              </form>
+            </article>
+          {% else %}
+            <div class="empty-state inline">
+              {{ icons.icon("learning") }}
+              <strong>Пока нет повторяющихся подтверждений.</strong>
+            </div>
+          {% endfor %}
+        </div>
+      </article>
+
+      <article class="panel span-6">
+        <div class="panel-head">
+          <div>
+            <h2>Правила processor</h2>
+            <p class="muted">Существующая таблица correction learning.</p>
+          </div>
+        </div>
+        <div class="rules-grid">
+          {% for rule in data.rules %}
+            <article class="rule-card">
+              <div class="rule-card-head">
+                <div>
+                  <h3>{{ rule.name }}</h3>
+                  <div class="review-meta">
+                    <span>{{ rule.area or "Без области" }}</span>
+                    <span>{{ rule.project or "Без проекта" }}</span>
+                    <span>{{ rule.entry_type or "Без типа" }}</span>
+                  </div>
+                </div>
+                <span class="status-pill {% if rule.active %}status-processed{% else %}status-unknown{% endif %}">{{ "Активно" if rule.active else "Выключено" }}</span>
+              </div>
+              <details>
+                <summary>Условие и решение</summary>
+                <pre class="text-block">{{ rule.condition or "—" }}</pre>
+                <pre class="json-block">{{ rule.decision or "—" }}</pre>
+              </details>
+              {% if data.active_supported %}
+                <form method="post" action="/rules/{{ rule.id }}/active">
+                  {{ csrf_input(request)|safe }}
+                  <input type="hidden" name="active" value="{% if rule.active %}0{% else %}1{% endif %}">
+                  <button class="button ghost compact" type="submit">{% if rule.active %}Выключить{% else %}Включить{% endif %}</button>
+                </form>
+              {% endif %}
+            </article>
+          {% else %}
+            <div class="empty-state inline">{{ icons.icon("learning") }}<strong>Правил пока нет.</strong></div>
+          {% endfor %}
+        </div>
+      </article>
+    </section>
+  {% endif %}
+
+  {% if data.active_tab == 'structure' %}
+    <section class="dashboard-grid">
+      <article class="panel span-6">
+        <h2>Рабочие проекты</h2>
+        <div class="distribution-list large">
+          {% for project in data.structure.projects %}
+            <div class="distribution-row"><span>{{ project.title }}</span><strong>{{ project.count }}</strong></div>
+          {% else %}
+            <p class="empty">Проекты не найдены в metadata.</p>
+          {% endfor %}
+        </div>
+      </article>
+      <article class="panel span-6">
+        <h2>Личные сферы</h2>
+        <div class="distribution-list large">
+          {% for name, count in data.structure.life_areas %}
+            <div class="distribution-row"><span>{{ name }}</span><strong>{{ count }}</strong></div>
+          {% else %}
+            <p class="empty">Сферы появятся после первых подтверждений.</p>
+          {% endfor %}
+        </div>
+      </article>
+      <article class="panel span-6">
+        <h2>Категории</h2>
+        <div class="distribution-list large">
+          {% for name, count in data.structure.categories %}
+            <div class="distribution-row"><span>{{ name }}</span><strong>{{ count }}</strong></div>
+          {% else %}
+            <p class="empty">Категории пока не заполнены.</p>
+          {% endfor %}
+        </div>
+      </article>
+      <article class="panel span-6">
+        <h2>Подкатегории</h2>
+        <div class="distribution-list large">
+          {% for name, count in data.structure.subcategories %}
+            <div class="distribution-row"><span>{{ name }}</span><strong>{{ count }}</strong></div>
+          {% else %}
+            <p class="empty">Подкатегории пока не заполнены.</p>
+          {% endfor %}
+        </div>
+      </article>
+      <article class="panel span-12">
+        <div class="panel-head">
+          <div>
+            <h2>Таксономия</h2>
+            <p class="muted">Идемпотентная таблица структуры, если schema ensure уже выполнен.</p>
+          </div>
+        </div>
+        <div class="rules-grid">
+          {% for item in data.structure.taxonomy_records %}
+            <div class="distribution-row">
+              <span>{{ item.name }} · {{ item.type or "—" }}{% if item.parent %} · {{ item.parent }}{% endif %}</span>
+              <strong>{{ "активно" if item.active else "выкл" }}</strong>
+            </div>
+          {% else %}
+            <p class="empty">Таксономия пуста или schema ensure ещё не выполнялся.</p>
+          {% endfor %}
+        </div>
+      </article>
+    </section>
+  {% endif %}
 {% endblock %}
