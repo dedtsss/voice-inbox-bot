@@ -1,62 +1,128 @@
 {% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% import "partials/record_macros.html" as records %}
 {% block title %}Обзор Voice Inbox{% endblock %}
 {% block content %}
-  <section class="heading-row">
+  <section class="page-hero">
     <div>
-      <h1>Обзор</h1>
-      <p class="muted">Время отображается в {{ overview.timezone }}.</p>
+      <span class="eyebrow">{{ icons.icon("overview") }}Production</span>
+      <h1>Обзор Voice Inbox</h1>
+      <p class="muted">Время отображается в {{ overview.timezone }}. Данные берутся с серверного Airtable API.</p>
     </div>
-    <a class="button primary" href="/records">Открыть записи</a>
+    <div class="hero-actions">
+      <a class="button primary" href="/kanban">{{ icons.icon("kanban") }}<span>Открыть канбан</span></a>
+      <a class="button" href="/needs-review">{{ icons.icon("review") }}<span>Проверка AI</span></a>
+    </div>
   </section>
 
-  <section class="metric-grid" aria-label="Сводка">
-    <a class="metric" href="/records">
-      <span class="metric-label">Всего доступно</span>
+  <section class="metric-grid xl" aria-label="Сводка">
+    <a class="metric accent-blue" href="/records">
+      <span class="metric-label">Всего записей</span>
       <strong>{{ overview.cards.total }}{% if overview.cards.limited %}+{% endif %}</strong>
+      <small>В текущей выборке</small>
     </a>
     <a class="metric" href="/records?status=New">
       <span class="metric-label">New</span>
       <strong>{{ overview.cards["New"] }}</strong>
+      <small>Ожидают processor</small>
     </a>
-    <a class="metric" href="/records?status=Processing">
+    <a class="metric accent-cyan" href="/records?status=Processing">
       <span class="metric-label">Processing</span>
       <strong>{{ overview.cards["Processing"] }}</strong>
-    </a>
-    <a class="metric" href="/processed">
-      <span class="metric-label">Processed</span>
-      <strong>{{ overview.cards["Processed"] }}</strong>
+      <small>Сейчас в работе</small>
     </a>
     <a class="metric urgent" href="/needs-review">
       <span class="metric-label">Needs Review</span>
       <strong>{{ overview.cards["Needs Review"] }}</strong>
+      <small>Нужна ручная проверка</small>
     </a>
-    <a class="metric" href="/records?period=today">
-      <span class="metric-label">Сегодня</span>
-      <strong>{{ overview.cards.today }}</strong>
-    </a>
-    <a class="metric" href="/records?period=7d">
-      <span class="metric-label">7 дней</span>
-      <strong>{{ overview.cards.last7 }}</strong>
-    </a>
-    <a class="metric" href="/records?source=Android">
-      <span class="metric-label">Android</span>
-      <strong>{{ overview.cards.Android }}</strong>
-    </a>
-    <a class="metric" href="/records?source=Telegram">
-      <span class="metric-label">Telegram</span>
-      <strong>{{ overview.cards.Telegram }}</strong>
-    </a>
-    <a class="metric urgent" href="/queue">
-      <span class="metric-label">Зависшие</span>
-      <strong>{{ overview.cards.stale }}</strong>
-    </a>
-    <a class="metric" href="/technical">
-      <span class="metric-label">Технические</span>
-      <strong>{{ overview.technical }}</strong>
+    <a class="metric accent-green" href="/processed">
+      <span class="metric-label">Processed</span>
+      <strong>{{ overview.cards["Processed"] }}</strong>
+      <small>Готово</small>
     </a>
   </section>
 
+  <section class="dashboard-grid">
+    <article class="panel span-8">
+      <div class="panel-head">
+        <div>
+          <h2>Операционная сводка</h2>
+          <p class="muted">Очередь, качество AI и обучение на исправлениях.</p>
+        </div>
+        <a class="icon-link" href="/analytics">{{ icons.icon("arrow") }}<span>В аналитику</span></a>
+      </div>
+      <div class="mini-stat-grid">
+        <a class="mini-stat" href="/records?period=today"><span>Сегодня</span><strong>{{ overview.cards.today }}</strong></a>
+        <a class="mini-stat" href="/records?period=7d"><span>7 дней</span><strong>{{ overview.cards.last7 }}</strong></a>
+        <a class="mini-stat warn" href="/queue"><span>Зависшие</span><strong>{{ overview.cards.stale }}</strong></a>
+        <a class="mini-stat danger" href="/records"><span>Ошибки</span><strong>{{ overview.cards.errors }}</strong></a>
+        <a class="mini-stat" href="/learning"><span>Активные правила</span><strong>{{ overview.cards.rules_active }}</strong></a>
+        <a class="mini-stat violet" href="/learning"><span>В обучении</span><strong>{{ overview.cards.training_pending }}</strong></a>
+        <div class="mini-stat"><span>AI confidence</span><strong>{% if overview.cards.ai_confidence_avg is not none %}{{ (overview.cards.ai_confidence_avg * 100)|round|int }}%{% else %}—{% endif %}</strong></div>
+        <a class="mini-stat" href="/technical"><span>Технические</span><strong>{{ overview.technical }}</strong></a>
+      </div>
+    </article>
+
+    <article class="panel span-4">
+      <div class="panel-head">
+        <div>
+          <h2>Источники</h2>
+          <p class="muted">Распределение входящих каналов.</p>
+        </div>
+        <a class="icon-link" href="/sources">{{ icons.icon("arrow") }}<span>Все</span></a>
+      </div>
+      <div class="distribution-list">
+        {% for source, count in overview.source_counts %}
+          <a href="/records?source={{ source }}" class="distribution-row">
+            <span>{{ source }}</span>
+            <strong>{{ count }}</strong>
+          </a>
+        {% else %}
+          <p class="empty">Источник пока не определен.</p>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel span-6">
+      <div class="panel-head">
+        <div>
+          <h2>Проекты</h2>
+          <p class="muted">Где чаще всего появляются входящие.</p>
+        </div>
+        <a class="icon-link" href="/projects">{{ icons.icon("arrow") }}<span>Проекты</span></a>
+      </div>
+      <div class="distribution-list">
+        {% for project, count in overview.project_counts %}
+          <a href="/records?project={{ project }}" class="distribution-row">
+            <span>{{ project }}</span>
+            <strong>{{ count }}</strong>
+          </a>
+        {% else %}
+          <p class="empty">Проекты пока не найдены.</p>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel span-6">
+      <div class="panel-head">
+        <div>
+          <h2>Последние события</h2>
+          <p class="muted">Свежие записи из общей выборки.</p>
+        </div>
+        <a class="icon-link" href="/records">{{ icons.icon("arrow") }}<span>Список</span></a>
+      </div>
+      <div class="mini-record-list">
+        {% for record in overview.recent_records %}
+          {{ records.mini_record(record) }}
+        {% else %}
+          <p class="empty">Записей пока нет.</p>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+
   {% if overview.cards.limited %}
-    <p class="muted">Сводка ограничена первыми {{ overview.max_records }} записями с ограниченным набором полей.</p>
+    <p class="muted footnote">Сводка ограничена первыми {{ overview.max_records }} записями с ограниченным набором полей.</p>
   {% endif %}
 {% endblock %}

@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% import "partials/record_macros.html" as records %}
+{% block title %}Обучение processor{% endblock %}
+{% block content %}
+  <section class="page-hero compact">
+    <div>
+      <span class="eyebrow">{{ icons.icon("learning") }}Correction learning</span>
+      <h1>Обучение</h1>
+      {% if data.active_supported %}
+        <p class="muted">Правила читаются из Airtable, активность меняется через существующее поле Активно.</p>
+      {% else %}
+        <p class="muted">В текущей схеме нет поля активности, поэтому правила отображаются без переключателя.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="metric-grid">
+    <a class="metric" href="/learning">
+      <span class="metric-label">Всего правил</span>
+      <strong>{{ data.cards.rules_total if data.cards and data.cards.rules_total is not none else data.rules|length }}</strong>
+      <small>Processing rules</small>
+    </a>
+    <a class="metric accent-green" href="/learning">
+      <span class="metric-label">Активные правила</span>
+      <strong>{{ data.cards.rules_active if data.cards and data.cards.rules_active is not none else data.rules|selectattr("active")|list|length }}</strong>
+      <small>Участвуют в processor</small>
+    </a>
+    <a class="metric urgent" href="/records">
+      <span class="metric-label">Ожидают учета</span>
+      <strong>{{ data.cards.training_pending if data.cards else "—" }}</strong>
+      <small>Save and train</small>
+    </a>
+    <a class="metric accent-blue" href="/records">
+      <span class="metric-label">Учтено</span>
+      <strong>{{ data.cards.training_applied if data.cards else "—" }}</strong>
+      <small>Correction applied</small>
+    </a>
+  </section>
+
+  <section class="dashboard-grid">
+    <article class="panel span-8">
+      <div class="panel-head">
+        <div>
+          <h2>Правила</h2>
+          <p class="muted">Список существующих правил correction learning.</p>
+        </div>
+      </div>
+      <div class="rules-grid">
+        {% for rule in data.rules %}
+          <article class="rule-card">
+            <div class="rule-card-head">
+              <div>
+                <h3>{{ rule.name }}</h3>
+                <div class="review-meta">
+                  <span>{{ rule.area or "Без области" }}</span>
+                  <span>{{ rule.project or "Без проекта" }}</span>
+                  <span>{{ rule.entry_type or "Без типа" }}</span>
+                </div>
+              </div>
+              <span class="status-pill {% if rule.active %}status-processed{% else %}status-unknown{% endif %}">{{ "Активно" if rule.active else "Выключено" }}</span>
+            </div>
+            <dl class="meta-grid compact-meta">
+              <div><dt>Использований</dt><dd>{{ rule.uses if rule.uses is not none else "—" }}</dd></div>
+              <div><dt>Последнее</dt><dd>{{ rule.last_used or "—" }}</dd></div>
+            </dl>
+            <details>
+              <summary>Условие и решение</summary>
+              <pre class="text-block">{{ rule.condition or "—" }}</pre>
+              <pre class="json-block">{{ rule.decision or "—" }}</pre>
+            </details>
+            {% if data.active_supported %}
+              <form method="post" action="/rules/{{ rule.id }}/active">
+                {{ csrf_input(request)|safe }}
+                <input type="hidden" name="active" value="{% if rule.active %}0{% else %}1{% endif %}">
+                <button class="button ghost compact" type="submit">{% if rule.active %}Выключить{% else %}Включить{% endif %}</button>
+              </form>
+            {% endif %}
+          </article>
+        {% else %}
+          <div class="empty-state inline">
+            {{ icons.icon("learning") }}
+            <strong>Правил пока нет.</strong>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <aside class="panel span-4">
+      <div class="panel-head">
+        <div>
+          <h2>Последние обучающие случаи</h2>
+          <p class="muted">Записи с correction flags или комментарием.</p>
+        </div>
+      </div>
+      <div class="mini-record-list">
+        {% for record in data.recent_cases %}
+          {{ records.mini_record(record) }}
+        {% else %}
+          <p class="empty">Недавних обучающих случаев в выборке нет.</p>
+        {% endfor %}
+      </div>
+    </aside>
+  </section>
+{% endblock %}

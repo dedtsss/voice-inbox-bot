@@ -1,117 +1,173 @@
 {% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% import "partials/record_macros.html" as records %}
 {% block title %}{{ record.title }}{% endblock %}
 {% block content %}
-  <section class="heading-row">
-    <div>
+  <section class="detail-hero">
+    <div class="detail-title">
+      <span class="eyebrow">{{ icons.icon("file") }}Record detail</span>
       <h1>{{ record.title }}</h1>
-      <p class="muted">{{ record.id }} · {{ record.created_local }}</p>
-    </div>
-    <a class="button" href="/records">К списку</a>
-  </section>
-
-  <section class="detail-grid">
-    <article class="panel">
-      <h2>Тексты</h2>
-      <div class="compare-grid">
-        <div>
-          <h3>Исходный текст</h3>
-          <pre class="text-block">{{ record.raw_text or "—" }}</pre>
-        </div>
-        <div>
-          <h3>Очищенный текст</h3>
-          <pre class="text-block">{{ record.clean_text or "—" }}</pre>
-        </div>
+      <div class="review-meta">
+        {{ records.status_pill(record.status) }}
+        <span>{{ record.id }}</span>
+        <span>{{ record.created_local }}</span>
+        {% if record.ai_confidence_percent is not none %}<span>AI {{ record.ai_confidence_percent }}%</span>{% endif %}
       </div>
-      <dl class="field-list">
-        <div><dt>Краткое содержание</dt><dd>{{ record.summary or "—" }}</dd></div>
-        <div><dt>Следующее действие</dt><dd>{{ record.next_action or "—" }}</dd></div>
-        <div><dt>Ошибка обработки</dt><dd>{{ record.processing_error or "—" }}</dd></div>
-      </dl>
-    </article>
-
-    <article class="panel">
-      <h2>Структура</h2>
-      <dl class="field-list">
-        <div><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
-        <div><dt>Тип записи</dt><dd>{{ record.entry_type or "—" }}</dd></div>
-        <div><dt>Статус</dt><dd>{{ record.status or "—" }}</dd></div>
-        <div><dt>External ID</dt><dd>{{ record.external_id or "—" }}</dd></div>
-        <div><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
-        <div><dt>Приоритет</dt><dd>{{ record.priority or "—" }}</dd></div>
-        <div><dt>Срок</dt><dd>{{ record.due_date or "—" }}</dd></div>
-        <div><dt>Контрагент</dt><dd>{{ record.counterparty or "—" }}</dd></div>
-        <div><dt>Сумма</dt><dd>{{ record.amount if record.amount is not none else "—" }}</dd></div>
-        <div><dt>Период</dt><dd>{{ record.period or "—" }}</dd></div>
-        <div><dt>Теги</dt><dd>{% if record.tags is iterable and record.tags is not string %}{{ record.tags|join(", ") }}{% else %}{{ record.tags or "—" }}{% endif %}</dd></div>
-        <div><dt>Уверенность AI</dt><dd>{{ record.ai_confidence if record.ai_confidence is not none else "—" }}</dd></div>
-        <div><dt>Версия обработчика</dt><dd>{{ record.processor_version or "—" }}</dd></div>
-        <div><dt>Создано</dt><dd>{{ record.created_local }}</dd></div>
-        <div><dt>Обработано</dt><dd>{{ record.processed_local }}</dd></div>
-      </dl>
-    </article>
-  </section>
-
-  <section class="panel">
-    <h2>Медиа и файлы</h2>
-    {% if record.google_drive %}
-      <p><a class="button" href="{{ record.google_drive }}" rel="noreferrer noopener" target="_blank">Google Drive originals</a></p>
-    {% endif %}
-    <div class="media-grid">
-      {% for attachment in record.attachments %}
-        <figure class="media-item">
-          {% if attachment.kind == "image" %}
-            <img src="/records/{{ record.id }}/attachments/{{ loop.index0 }}" alt="">
-          {% elif attachment.kind == "audio" %}
-            <audio controls preload="none" src="/records/{{ record.id }}/attachments/{{ loop.index0 }}"></audio>
-          {% elif attachment.kind == "video" %}
-            <video controls preload="metadata" src="/records/{{ record.id }}/attachments/{{ loop.index0 }}"></video>
-          {% else %}
-            <a class="button" href="/records/{{ record.id }}/attachments/{{ loop.index0 }}">Открыть файл</a>
-          {% endif %}
-          <figcaption>{{ attachment.filename }}{% if attachment.size %} · {{ attachment.size }} байт{% endif %}</figcaption>
-        </figure>
-      {% else %}
-        <p class="empty">Вложения отсутствуют.</p>
-      {% endfor %}
+    </div>
+    <div class="hero-actions">
+      <a class="button ghost" href="/records">К списку</a>
+      <a class="button" href="/kanban">{{ icons.icon("kanban") }}<span>Канбан</span></a>
     </div>
   </section>
 
-  <section class="panel">
-    <h2>Исправить структурированные данные</h2>
-    <form class="edit-form" method="post" action="/records/{{ record.id }}/save">
-      {{ csrf_input(request)|safe }}
-      {% for field in record.editable_fields %}
-        <label class="{% if field.input_type == 'textarea' %}span-2{% endif %}">
-          <span>{{ field.label }}</span>
-          {% if field.input_type == "select" %}
-            <select name="{{ field.key }}">
-              <option value="">—</option>
-              {% for option in field.options %}
-                <option value="{{ option }}" {% if field.value == option %}selected{% endif %}>{{ option }}</option>
-              {% endfor %}
-            </select>
-          {% elif field.input_type == "textarea" %}
-            <textarea name="{{ field.key }}" maxlength="{{ field.max_length }}" rows="4">{{ field.value }}</textarea>
-          {% else %}
-            <input name="{{ field.key }}" type="{{ field.input_type }}" value="{{ field.value }}" {% if field.max_length %}maxlength="{{ field.max_length }}"{% endif %}>
+  <section class="detail-layout">
+    <div class="detail-main">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Тексты</h2>
+            <p class="muted">Исходный текст, очищенная версия и summary.</p>
+          </div>
+        </div>
+        <div class="compare-grid">
+          <div>
+            <h3>Исходный текст</h3>
+            <pre class="text-block">{{ record.raw_text or "—" }}</pre>
+          </div>
+          <div>
+            <h3>Очищенный текст</h3>
+            <pre class="text-block">{{ record.clean_text or "—" }}</pre>
+          </div>
+        </div>
+        <dl class="field-list">
+          <div><dt>Краткое содержание</dt><dd>{{ record.summary or "—" }}</dd></div>
+          <div><dt>Следующее действие</dt><dd>{{ record.next_action or "—" }}</dd></div>
+          {% if record.processing_error %}
+            <div class="danger-row"><dt>Ошибка обработки</dt><dd>{{ record.processing_error }}</dd></div>
           {% endif %}
-          {% if errors and errors.get(field.key) %}
-            <b class="field-error">{{ errors.get(field.key) }}</b>
-          {% endif %}
-        </label>
-      {% endfor %}
-      {% if errors and errors.get("unknown") %}
-        <p class="field-error">{{ errors.get("unknown") }}</p>
-      {% endif %}
-      <div class="form-actions span-2">
-        <button class="button primary" type="submit" name="action" value="save">Сохранить</button>
-        <button class="button train" type="submit" name="action" value="save_train">Сохранить и обучить</button>
-      </div>
-    </form>
-  </section>
+        </dl>
+      </article>
 
-  <details class="panel technical-json">
-    <summary>Технический AI JSON</summary>
-    <pre class="json-block">{{ record.ai_json_pretty or "—" }}</pre>
-  </details>
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Медиа и файлы</h2>
+            <p class="muted">Вложения открываются через server-side proxy.</p>
+          </div>
+          {% if record.google_drive %}
+            <a class="icon-link" href="{{ record.google_drive }}" rel="noreferrer noopener" target="_blank">{{ icons.icon("external") }}<span>Google Drive</span></a>
+          {% endif %}
+        </div>
+        <div class="media-grid">
+          {% for attachment in record.attachments %}
+            <figure class="media-item">
+              <div class="media-preview">
+                {% if attachment.kind == "image" %}
+                  <img src="/records/{{ record.id }}/attachments/{{ loop.index0 }}" alt="">
+                {% elif attachment.kind == "audio" %}
+                  {{ icons.icon("audio", "media-icon") }}
+                  <audio controls preload="none" src="/records/{{ record.id }}/attachments/{{ loop.index0 }}"></audio>
+                {% elif attachment.kind == "video" %}
+                  <video controls preload="metadata" src="/records/{{ record.id }}/attachments/{{ loop.index0 }}"></video>
+                {% else %}
+                  {{ icons.icon("clip", "media-icon") }}
+                  <a class="button" href="/records/{{ record.id }}/attachments/{{ loop.index0 }}">Открыть файл</a>
+                {% endif %}
+              </div>
+              <figcaption>{{ attachment.filename }}{% if attachment.size %} · {{ attachment.size }} байт{% endif %}</figcaption>
+            </figure>
+          {% else %}
+            <div class="empty-state inline">
+              {{ icons.icon("clip") }}
+              <strong>Вложения отсутствуют.</strong>
+            </div>
+          {% endfor %}
+        </div>
+      </article>
+
+      <details class="panel technical-json">
+        <summary>{{ icons.icon("database") }}<span>Технический AI JSON</span></summary>
+        <pre class="json-block">{{ record.ai_json_pretty or "—" }}</pre>
+      </details>
+    </div>
+
+    <aside class="detail-side">
+      <article class="panel sticky-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Структура</h2>
+            <p class="muted">Основные поля записи.</p>
+          </div>
+        </div>
+        <dl class="field-list dense">
+          <div><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
+          <div><dt>Тип</dt><dd>{{ record.entry_type or "—" }}</dd></div>
+          <div><dt>Статус</dt><dd>{{ record.status or "—" }}</dd></div>
+          <div><dt>External ID</dt><dd>{{ record.external_id or "—" }}</dd></div>
+          <div><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
+          <div><dt>Приоритет</dt><dd>{{ record.priority or "—" }}</dd></div>
+          <div><dt>Срок</dt><dd>{{ record.due_date or "—" }}</dd></div>
+          <div><dt>Контрагент</dt><dd>{{ record.counterparty or "—" }}</dd></div>
+          <div><dt>Сумма</dt><dd>{{ record.amount if record.amount is not none else "—" }}</dd></div>
+          <div><dt>Период</dt><dd>{{ record.period or "—" }}</dd></div>
+          <div><dt>Теги</dt><dd>{% if record.tags is iterable and record.tags is not string %}{{ record.tags|join(", ") }}{% else %}{{ record.tags or "—" }}{% endif %}</dd></div>
+          <div><dt>Уверенность AI</dt><dd>{% if record.ai_confidence_percent is not none %}{{ record.ai_confidence_percent }}%{% else %}—{% endif %}</dd></div>
+          <div><dt>Версия обработчика</dt><dd>{{ record.processor_version or "—" }}</dd></div>
+          <div><dt>Обработано</dt><dd>{{ record.processed_local }}</dd></div>
+        </dl>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Checklist</h2>
+            <p class="muted">Быстрый контроль качества записи.</p>
+          </div>
+        </div>
+        <ul class="check-list">
+          <li class="{% if record.raw_text %}done{% endif %}">{{ icons.icon("check") }}<span>Есть исходный текст</span></li>
+          <li class="{% if record.clean_text %}done{% endif %}">{{ icons.icon("check") }}<span>Есть очищенный текст</span></li>
+          <li class="{% if record.project %}done{% endif %}">{{ icons.icon("check") }}<span>Проект определен</span></li>
+          <li class="{% if record.next_action %}done{% endif %}">{{ icons.icon("check") }}<span>Следующее действие задано</span></li>
+          <li class="{% if record.attachments %}done{% endif %}">{{ icons.icon("check") }}<span>Вложения доступны</span></li>
+        </ul>
+      </article>
+
+      <article class="panel edit-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Исправить данные</h2>
+            <p class="muted">Редактируются только разрешенные поля.</p>
+          </div>
+        </div>
+        <form class="edit-form" method="post" action="/records/{{ record.id }}/save">
+          {{ csrf_input(request)|safe }}
+          {% for field in record.editable_fields %}
+            <label class="{% if field.input_type == 'textarea' %}span-2{% endif %}">
+              <span>{{ field.label }}</span>
+              {% if field.input_type == "select" %}
+                <select name="{{ field.key }}">
+                  <option value="">—</option>
+                  {% for option in field.options %}
+                    <option value="{{ option }}" {% if field.value == option %}selected{% endif %}>{{ option }}</option>
+                  {% endfor %}
+                </select>
+              {% elif field.input_type == "textarea" %}
+                <textarea name="{{ field.key }}" maxlength="{{ field.max_length }}" rows="4">{{ field.value }}</textarea>
+              {% else %}
+                <input name="{{ field.key }}" type="{{ field.input_type }}" value="{{ field.value }}" {% if field.max_length %}maxlength="{{ field.max_length }}"{% endif %}>
+              {% endif %}
+              {% if errors and errors.get(field.key) %}
+                <b class="field-error">{{ errors.get(field.key) }}</b>
+              {% endif %}
+            </label>
+          {% endfor %}
+          <div class="form-actions span-2">
+            <button class="button primary" type="submit" name="action" value="save">{{ icons.icon("save") }}<span>Сохранить</span></button>
+            <button class="button train" type="submit" name="action" value="save_train">{{ icons.icon("train") }}<span>Сохранить и обучить</span></button>
+          </div>
+        </form>
+      </article>
+    </aside>
+  </section>
 {% endblock %}

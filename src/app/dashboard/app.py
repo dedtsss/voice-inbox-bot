@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
@@ -55,6 +56,10 @@ def create_dashboard_app(
     async def robots() -> str:
         return "User-agent: *\nDisallow: /\n"
 
+    @app.get("/favicon.ico")
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
     @app.get("/", response_class=HTMLResponse)
     async def overview(request: Request, saved: str = "", error: str = "") -> Response:
         return render(request, "overview.html", {"overview": await to_thread(service.overview), "saved": saved, "error": error})
@@ -64,12 +69,19 @@ def create_dashboard_app(
         data = await to_thread(service.list_records, clean_query(request.query_params))
         return render(request, "records.html", {"data": data, "section": "records"})
 
+    @app.get("/kanban", response_class=HTMLResponse)
+    async def kanban(request: Request) -> Response:
+        data = await to_thread(service.kanban, clean_query(request.query_params))
+        return render(request, "kanban.html", {"data": data, "section": "kanban"})
+
     @app.get("/needs-review", response_class=HTMLResponse)
     async def needs_review(request: Request, saved: str = "", error: str = "") -> Response:
-        query = clean_query(request.query_params)
-        query["status"] = "Needs Review"
-        data = await to_thread(service.list_records, query)
-        return render(request, "records.html", {"data": data, "section": "needs-review", "saved": saved, "error": error})
+        data = await to_thread(service.review_records, clean_query(request.query_params))
+        return render(request, "review.html", {"data": data, "section": "needs-review", "saved": saved, "error": error})
+
+    @app.get("/ai-review")
+    async def ai_review_redirect() -> Response:
+        return RedirectResponse(url="/needs-review", status_code=307)
 
     @app.get("/queue", response_class=HTMLResponse)
     async def queue(request: Request) -> Response:
@@ -92,6 +104,31 @@ def create_dashboard_app(
         data = await to_thread(service.list_records, query)
         return render(request, "records.html", {"data": data, "section": "technical"})
 
+    @app.get("/learning", response_class=HTMLResponse)
+    async def learning(request: Request, saved: str = "", error: str = "") -> Response:
+        data = await to_thread(service.learning_dashboard)
+        return render(request, "learning.html", {"data": data, "saved": saved, "error": error})
+
+    @app.get("/projects", response_class=HTMLResponse)
+    async def projects(request: Request) -> Response:
+        data = await to_thread(service.projects_dashboard)
+        return render(request, "projects.html", {"data": data})
+
+    @app.get("/sources", response_class=HTMLResponse)
+    async def sources(request: Request) -> Response:
+        data = await to_thread(service.sources_dashboard)
+        return render(request, "sources.html", {"data": data})
+
+    @app.get("/analytics", response_class=HTMLResponse)
+    async def analytics(request: Request) -> Response:
+        overview_data = await to_thread(service.analytics_dashboard)
+        return render(request, "analytics.html", {"overview": overview_data})
+
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page(request: Request) -> Response:
+        data = await to_thread(service.settings_dashboard)
+        return render(request, "settings.html", {"data": data})
+
     @app.get("/records/{record_id}", response_class=HTMLResponse)
     async def record_detail(request: Request, record_id: str, saved: str = "", error: str = "") -> Response:
         record = await to_thread(service.fetch_record, record_id)
@@ -105,11 +142,16 @@ def create_dashboard_app(
             raise HTTPException(status_code=403, detail="Invalid CSRF token")
         action = str(form.get("action") or "save")
         train = action == "save_train"
-        result = await to_thread(service.update_record_from_form, record_id, dict(form), train=train)
+        form_data = dict(form)
+        return_to = safe_return_path(str(form_data.pop("return_to", "") or ""))
+        result = await to_thread(service.update_record_from_form, record_id, form_data, train=train)
         if result.errors:
             record = await to_thread(service.fetch_record, record_id)
             return render(request, "detail.html", {"record": record, "errors": result.errors, "error": "Проверьте поля формы"}, status_code=422)
         suffix = "saved=trained" if train else "saved=1"
+        if return_to:
+            separator = "&" if "?" in return_to else "?"
+            return RedirectResponse(url=f"{return_to}{separator}{suffix}", status_code=303)
         return RedirectResponse(url=f"/records/{record_id}?{suffix}", status_code=303)
 
     @app.get("/records/{record_id}/attachments/{index}")
@@ -124,7 +166,7 @@ def create_dashboard_app(
     @app.get("/rules", response_class=HTMLResponse)
     async def rules(request: Request, saved: str = "", error: str = "") -> Response:
         data = await to_thread(service.list_rules)
-        return render(request, "rules.html", {"data": data, "saved": saved, "error": error})
+        return render(request, "learning.html", {"data": {**data, "cards": {}, "recent_cases": []}, "saved": saved, "error": error})
 
     @app.post("/rules/{record_id}/active")
     async def set_rule_active(request: Request, record_id: str) -> Response:
@@ -161,3 +203,23 @@ def clean_query(query_params: Any) -> dict[str, str]:
         for key, value in query_params.items()
         if key in allowed and str(value).strip()
     }
+
+
+def safe_return_path(raw: str) -> str:
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
+        return ""
+    allowed_paths = {"/needs-review", "/kanban", "/records", "/learning", "/rules"}
+    if parsed.path not in allowed_paths:
+        return ""
+    allowed_query = {"q", "status", "source", "project", "entry_type", "period", "sort", "page_size"}
+    query = urlencode(
+        [
+            (key, value[:500])
+            for key, value in parse_qsl(parsed.query, keep_blank_values=False)
+            if key in allowed_query
+        ]
+    )
+    return f"{parsed.path}?{query}" if query else parsed.path

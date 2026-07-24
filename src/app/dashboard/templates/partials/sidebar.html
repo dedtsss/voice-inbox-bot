@@ -1,0 +1,28 @@
+{% import "partials/icons.html" as icons %}
+{% set path = request.url.path %}
+<aside class="sidebar" id="app-sidebar" aria-label="Навигация dashboard">
+  <a class="brand" href="/" aria-label="Voice Inbox overview">
+    <span class="brand-mark">{{ icons.icon("inbox") }}</span>
+    <span>
+      <strong>Voice Inbox</strong>
+      <small>Production dashboard</small>
+    </span>
+  </a>
+
+  <nav class="side-nav">
+    <a href="/" class="{% if path == '/' %}active{% endif %}">{{ icons.icon("overview") }}<span>Обзор</span></a>
+    <a href="/records" class="{% if path == '/records' or path.startswith('/records/') %}active{% endif %}">{{ icons.icon("inbox") }}<span>Входящие</span></a>
+    <a href="/kanban" class="{% if path == '/kanban' %}active{% endif %}">{{ icons.icon("kanban") }}<span>Канбан</span></a>
+    <a href="/needs-review" class="{% if path == '/needs-review' %}active{% endif %}">{{ icons.icon("review") }}<span>Проверка AI</span></a>
+    <a href="/learning" class="{% if path in ['/learning', '/rules'] %}active{% endif %}">{{ icons.icon("learning") }}<span>Обучение</span></a>
+    <a href="/projects" class="{% if path == '/projects' %}active{% endif %}">{{ icons.icon("projects") }}<span>Проекты</span></a>
+    <a href="/sources" class="{% if path == '/sources' %}active{% endif %}">{{ icons.icon("sources") }}<span>Источники</span></a>
+    <a href="/analytics" class="{% if path == '/analytics' %}active{% endif %}">{{ icons.icon("analytics") }}<span>Аналитика</span></a>
+    <a href="/settings" class="{% if path == '/settings' %}active{% endif %}">{{ icons.icon("settings") }}<span>Настройки</span></a>
+  </nav>
+
+  <div class="sidebar-foot">
+    <div class="security-chip">{{ icons.icon("shield") }}<span>Cloudflare Access</span></div>
+    <div class="security-chip">{{ icons.icon("database") }}<span>Airtable server-side</span></div>
+  </div>
+</aside>

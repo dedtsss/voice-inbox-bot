@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.airtable import AirtableError, ProjectMatch
 from app.config import Settings
 from app.dashboard.airtable_service import DashboardAirtableService
-from app.dashboard.app import create_dashboard_app
+from app.dashboard.app import create_dashboard_app, safe_return_path
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -299,6 +299,42 @@ def test_records_list_renders() -> None:
     assert response.status_code == 200
     assert "Dashboard canary" in response.text
     assert "summary" in response.text
+
+
+def test_new_dashboard_sections_render() -> None:
+    client, _ = make_client()
+
+    expected = {
+        "/kanban": "Канбан входящих",
+        "/needs-review": "Проверка AI",
+        "/learning": "Обучение",
+        "/projects": "Проекты",
+        "/sources": "Источники",
+        "/analytics": "Аналитика",
+        "/settings": "Настройки",
+    }
+
+    for path, marker in expected.items():
+        response = client.get(path)
+        assert response.status_code == 200
+        assert marker in response.text
+
+
+def test_kanban_page_uses_real_record_data() -> None:
+    records = [
+        make_record("recKanbanNew1", **{"Статус обработки": "New", "Название": "Inbox new"}),
+        make_record("recKanbanProc", **{"Статус обработки": "Processing", "Название": "Inbox processing"}),
+        make_record("recKanbanDone", **{"Статус обработки": "Processed", "Название": "Inbox done"}),
+    ]
+    client, airtable = make_client(FakeAirtable(records=records))
+
+    response = client.get("/kanban?q=Inbox")
+
+    assert response.status_code == 200
+    assert "Inbox new" in response.text
+    assert "Inbox processing" in response.text
+    assert "Inbox done" in response.text
+    assert "filterByFormula" in dict(airtable.page_calls[-1]["params"])
 
 
 def test_detail_card_renders_and_does_not_expose_attachment_url() -> None:
@@ -654,6 +690,37 @@ def test_save_and_train_sets_existing_learning_flags() -> None:
     assert fields["Обучить на исправлении"] is True
     assert fields["Обучение учтено"] is False
     assert fields["Комментарий к исправлению"] == "route to Work"
+
+
+def test_needs_review_quick_save_and_train_returns_to_review() -> None:
+    client, airtable = make_client()
+    token = csrf_from(client.get("/needs-review").text)
+
+    response = client.post(
+        "/records/recDashboard1/save",
+        data={
+            "csrf_token": token,
+            "project": "Work",
+            "action": "save_train",
+            "correction_comment": "review screen correction",
+            "return_to": "/needs-review?q=Dashboard",
+        },
+        headers={"Origin": "http://testserver"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/needs-review?q=Dashboard&saved=trained"
+    _, fields = airtable.updates[-1]
+    assert fields["Обучить на исправлении"] is True
+    assert fields["Комментарий к исправлению"] == "review screen correction"
+
+
+def test_return_path_rejects_external_redirects() -> None:
+    assert safe_return_path("https://evil.example/needs-review") == ""
+    assert safe_return_path("//evil.example/needs-review") == ""
+    assert safe_return_path("/records/recDashboard1") == ""
+    assert safe_return_path("/kanban?q=abc&csrf_token=bad") == "/kanban?q=abc"
 
 
 def test_rules_can_toggle_existing_active_field() -> None:

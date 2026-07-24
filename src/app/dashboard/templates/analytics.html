@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
+{% block title %}Аналитика{% endblock %}
+{% block content %}
+  <section class="page-hero compact">
+    <div>
+      <span class="eyebrow">{{ icons.icon("analytics") }}Analytics</span>
+      <h1>Аналитика</h1>
+      <p class="muted">Сводка по статусам, источникам, проектам и обучению на исправлениях.</p>
+    </div>
+  </section>
+
+  <section class="metric-grid xl">
+    <a class="metric" href="/records"><span class="metric-label">Всего</span><strong>{{ overview.cards.total }}{% if overview.cards.limited %}+{% endif %}</strong><small>В выборке</small></a>
+    <a class="metric" href="/records?period=today"><span class="metric-label">Сегодня</span><strong>{{ overview.cards.today }}</strong><small>Новые записи</small></a>
+    <a class="metric" href="/records?period=7d"><span class="metric-label">7 дней</span><strong>{{ overview.cards.last7 }}</strong><small>Неделя</small></a>
+    <a class="metric urgent" href="/queue"><span class="metric-label">Зависшие</span><strong>{{ overview.cards.stale }}</strong><small>New / Processing</small></a>
+    <a class="metric accent-blue" href="/learning"><span class="metric-label">AI confidence</span><strong>{% if overview.cards.ai_confidence_avg is not none %}{{ (overview.cards.ai_confidence_avg * 100)|round|int }}%{% else %}—{% endif %}</strong><small>Среднее значение</small></a>
+  </section>
+
+  <section class="dashboard-grid">
+    <article class="panel span-6">
+      <div class="panel-head"><h2>Статусы</h2></div>
+      <div class="distribution-list large">
+        {% for status, count in overview.status_counts %}
+          <a href="/records?status={{ status }}" class="distribution-row"><span>{{ status }}</span><strong>{{ count }}</strong></a>
+        {% endfor %}
+      </div>
+    </article>
+    <article class="panel span-6">
+      <div class="panel-head"><h2>Источники</h2></div>
+      <div class="distribution-list large">
+        {% for source, count in overview.source_counts %}
+          <a href="/records?source={{ source }}" class="distribution-row"><span>{{ source }}</span><strong>{{ count }}</strong></a>
+        {% endfor %}
+      </div>
+    </article>
+    <article class="panel span-6">
+      <div class="panel-head"><h2>Типы</h2></div>
+      <div class="distribution-list large">
+        {% for entry_type, count in overview.type_counts %}
+          <a href="/records?entry_type={{ entry_type }}" class="distribution-row"><span>{{ entry_type }}</span><strong>{{ count }}</strong></a>
+        {% endfor %}
+      </div>
+    </article>
+    <article class="panel span-6">
+      <div class="panel-head"><h2>Обучение</h2></div>
+      <div class="mini-stat-grid two">
+        <div class="mini-stat"><span>Всего правил</span><strong>{{ overview.cards.rules_total }}</strong></div>
+        <div class="mini-stat"><span>Активные</span><strong>{{ overview.cards.rules_active }}</strong></div>
+        <div class="mini-stat violet"><span>Запрошено</span><strong>{{ overview.cards.training_requested }}</strong></div>
+        <div class="mini-stat"><span>Учтено</span><strong>{{ overview.cards.training_applied }}</strong></div>
+      </div>
+    </article>
+  </section>
+{% endblock %}

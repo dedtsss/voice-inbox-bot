@@ -1,8 +1,10 @@
 {% extends "base.html" %}
+{% import "partials/icons.html" as icons %}
 {% block title %}Ошибка{% endblock %}
 {% block content %}
-  <section class="panel">
-    <h1>Ошибка</h1>
-    <p>{{ message }}</p>
+  <section class="empty-state page-error">
+    {{ icons.icon("alert") }}
+    <strong>Ошибка</strong>
+    <span>{{ message }}</span>
   </section>
 {% endblock %}

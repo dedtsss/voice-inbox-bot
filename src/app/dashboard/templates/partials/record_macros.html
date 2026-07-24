@@ -1,0 +1,85 @@
+{% import "partials/icons.html" as icons %}
+
+{% macro status_key(status) -%}
+  {%- if status == "New" -%}new{%- elif status == "Processing" -%}processing{%- elif status == "Needs Review" -%}review{%- elif status == "Processed" -%}processed{%- else -%}unknown{%- endif -%}
+{%- endmacro %}
+
+{% macro status_pill(status) -%}
+  <span class="status-pill status-{{ status_key(status)|trim }}">{{ status or "Без статуса" }}</span>
+{%- endmacro %}
+
+{% macro source_icon(source) -%}
+  {%- if source == "Android" -%}
+    {{ icons.icon("sources") }}
+  {%- elif source == "Telegram" -%}
+    {{ icons.icon("audio") }}
+  {%- else -%}
+    {{ icons.icon("file") }}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro record_card(record) -%}
+  <article class="record-card age-{{ record.age_state }}">
+    <div class="record-card-head">
+      <span class="record-type-icon">{{ source_icon(record.source) }}</span>
+      <div class="record-title-block">
+        <a class="record-title" href="/records/{{ record.id }}">{{ record.title }}</a>
+        <span class="record-id">{{ record.id }}</span>
+      </div>
+      {{ status_pill(record.status) }}
+    </div>
+    <p class="record-summary">{{ record.summary or record.clean_text or record.raw_text or "Нет текста" }}</p>
+    <dl class="meta-grid compact-meta">
+      <div><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
+      <div><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
+      <div><dt>Тип</dt><dd>{{ record.entry_type or "—" }}</dd></div>
+      <div><dt>Создано</dt><dd>{{ record.created_local }}</dd></div>
+      {% if record.ai_confidence_percent is not none %}
+        <div><dt>AI</dt><dd>{{ record.ai_confidence_percent }}%</dd></div>
+      {% endif %}
+      {% if record.age_state in ["delay", "stale"] %}
+        <div><dt>Возраст</dt><dd>{{ record.age_minutes }} мин</dd></div>
+      {% endif %}
+    </dl>
+    <div class="card-actions">
+      {% if record.priority %}
+        <span class="tag priority">{{ record.priority }}</span>
+      {% endif %}
+      {% if record.due_date %}
+        <span class="tag">{{ icons.icon("clock") }}{{ record.due_date }}</span>
+      {% endif %}
+      <a class="icon-link" href="/records/{{ record.id }}">{{ icons.icon("arrow") }}<span>Открыть</span></a>
+    </div>
+  </article>
+{%- endmacro %}
+
+{% macro kanban_card(record) -%}
+  <a class="kanban-card age-{{ record.age_state }}" href="/records/{{ record.id }}">
+    <div class="kanban-card-top">
+      <span class="record-type-icon small">{{ source_icon(record.source) }}</span>
+      {{ status_pill(record.status) }}
+    </div>
+    <strong>{{ record.title }}</strong>
+    <span class="kanban-summary">{{ record.summary or record.clean_text or record.raw_text or "Нет текста" }}</span>
+    <dl class="kanban-meta">
+      <div><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
+      <div><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
+      <div><dt>Тип</dt><dd>{{ record.entry_type or "—" }}</dd></div>
+      {% if record.ai_confidence_percent is not none %}
+        <div><dt>AI</dt><dd>{{ record.ai_confidence_percent }}%</dd></div>
+      {% endif %}
+    </dl>
+    <span class="kanban-time">{{ record.created_local }}</span>
+  </a>
+{%- endmacro %}
+
+{% macro mini_record(record) -%}
+  <a class="mini-record" href="/records/{{ record.id }}">
+    <span class="record-type-icon small">{{ source_icon(record.source) }}</span>
+    <span>
+      <strong>{{ record.title }}</strong>
+      <small>{{ record.source or "—" }} · {{ record.created_local }}</small>
+    </span>
+    {{ status_pill(record.status) }}
+  </a>
+{%- endmacro %}
