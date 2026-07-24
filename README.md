@@ -217,18 +217,32 @@ DASHBOARD_ATTACHMENT_TIMEOUT_SECONDS=30
 
 `DASHBOARD_PUBLIC_ORIGIN` должен совпадать с внешним origin dashboard, а `DASHBOARD_ALLOWED_HOSTS` — с разрешёнными Host header. Эти значения используются для Host validation и Origin/Referer validation на изменяющих запросах.
 
-### Airtable и сортировка
+### Airtable и глобальная сортировка
 
 Dashboard использует существующий `AirtableClient`, текущие env mapping полей и Airtable metadata. Select-варианты для `Проект`, `Тип` и `Приоритет` берутся из metadata, поэтому устаревшие значения не хардкодятся в UI.
 
 Список записей использует Airtable pagination `offset`, `pageSize`, ограниченный набор `fields[]`, server-side formula filters и поиск по текстовым полям. Сводка загружает только ограниченную выборку полей до `DASHBOARD_OVERVIEW_MAX_RECORDS`; если записей больше, UI показывает `+`.
 
-Для точной сортировки по времени через Airtable задайте один из вариантов:
+Глобальная сортировка должна выполняться в Airtable до применения `offset` и `pageSize`. Нельзя полагаться на локальную сортировку одной уже полученной Airtable-страницы: в таком режиме новая запись может находиться на следующей странице и не попасть в начало dashboard.
 
-- `DASHBOARD_AIRTABLE_VIEW` — view в Airtable, отсортированный по времени;
-- `DASHBOARD_CREATED_TIME_FIELD` — существующее поле Airtable типа Created Time.
+Поддерживаются два точных server-side режима:
 
-Если ни view, ни поле не заданы, dashboard сортирует по `createdTime` только текущую страницу, не создавая новое поле в Airtable.
+- `DASHBOARD_AIRTABLE_VIEW` — приоритетный режим. Значение должно указывать на существующий Airtable view таблицы `Inbox`, уже отсортированный по времени создания от новых к старым. Dashboard передаёт `view` во все запросы списка и считает порядок точным только если view найден в metadata. Пользовательский `sort=asc` в этом режиме не меняет порядок view.
+- `DASHBOARD_CREATED_TIME_FIELD` — режим server-side `sort`. Значение должно указывать на существующее поле Airtable типа `Created time` или на formula field с точной формулой `CREATED_TIME()`, например `Dashboard Created Time`. Dashboard передаёт `sort[0][field]` и `sort[0][direction]` в каждый list-запрос до пагинации. Направление по умолчанию `desc`; `sort=asc` разрешён только как направление для этого же allowlisted поля. Для стабильности одинаковых timestamp добавляется дополнительная сортировка по безопасному существующему текстовому полю, если оно есть.
+
+Если настроены оба варианта, используется `DASHBOARD_AIRTABLE_VIEW`.
+
+Если `DASHBOARD_AIRTABLE_VIEW` или `DASHBOARD_CREATED_TIME_FIELD` настроены, но не существуют в Airtable metadata или указывают на неподходящий тип поля, dashboard возвращает безопасную Airtable-ошибку вместо молчаливого отката на локальную сортировку страницы.
+
+Если ни view, ни Created time field не заданы, dashboard работает в ограниченном режиме `page_only_unsafe`: он может локально упорядочить только текущую полученную страницу по системному `createdTime`, но не гарантирует глобальный порядок между страницами. При запуске пишется безопасное предупреждение в лог, в UI списка показывается предупреждение, а `GET /healthz` возвращает диагностический `sorting_mode`.
+
+Возможные значения `sorting_mode`:
+
+- `airtable_view` — порядок задаёт Airtable view.
+- `airtable_field` — порядок задаёт Airtable `Created time` field через server-side `sort`.
+- `page_only_unsafe` — точная глобальная сортировка не настроена.
+
+Production-проверка должна подтверждать только факт наличия выбранной переменной и `sorting_mode`; не выводите Airtable IDs, токены, тексты записей, attachment URL или AI JSON.
 
 ### Разделы
 

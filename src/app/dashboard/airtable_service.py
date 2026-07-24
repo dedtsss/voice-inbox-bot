@@ -37,6 +37,23 @@ EDITABLE_KEYS = (
     "correction_comment",
 )
 RECORD_ID_RE = re.compile(r"^rec[A-Za-z0-9]{8,32}$")
+SORTING_MODE_AIRTABLE_VIEW = "airtable_view"
+SORTING_MODE_AIRTABLE_FIELD = "airtable_field"
+SORTING_MODE_PAGE_ONLY_UNSAFE = "page_only_unsafe"
+SORT_COMPATIBLE_FIELD_TYPES = {
+    "singleLineText",
+    "email",
+    "url",
+    "phoneNumber",
+    "singleSelect",
+    "date",
+    "dateTime",
+    "createdTime",
+    "lastModifiedTime",
+    "number",
+    "currency",
+    "percent",
+}
 
 
 @dataclass(frozen=True)
@@ -63,6 +80,14 @@ class EditableField:
 class ValidationResult:
     fields: dict[str, Any]
     errors: dict[str, str]
+
+
+@dataclass(frozen=True)
+class SortingConfig:
+    mode: str
+    direction: str
+    params: tuple[tuple[str, str], ...] = ()
+    is_exact: bool = False
 
 
 class DashboardAirtableService:
@@ -160,34 +185,29 @@ class DashboardAirtableService:
         bindings: dict[str, FieldBinding] = metadata["bindings"]
         page_size = parse_int(query.get("page_size"), default=self.settings.dashboard_page_size, minimum=1, maximum=50)
         offset = query.get("offset", "").strip()
-        sort_direction = "asc" if query.get("sort") == "asc" else "desc"
+        sorting = resolve_sorting_config(self.settings, metadata["table"], query.get("sort"))
         formula = build_records_formula(query, bindings, self.settings)
         params = limited_fields_params(list(bindings.values()))
         if formula:
             params.append(("filterByFormula", formula))
-        if self.settings.dashboard_airtable_view.strip():
-            params.append(("view", self.settings.dashboard_airtable_view.strip()))
-        created_field = resolve_created_time_sort_field(self.settings, metadata["table"])
-        if created_field:
-            params.extend(
-                [
-                    ("sort[0][field]", created_field),
-                    ("sort[0][direction]", sort_direction),
-                ]
-            )
+        params.extend(sorting.params)
         payload = self.airtable.list_voice_records_page(params=params, page_size=page_size, offset=offset)
         records = [normalize_record(record, bindings, self.settings) for record in payload.get("records") or []]
-        if not created_field:
-            records.sort(key=lambda item: item["created_at"] or datetime.min.replace(tzinfo=UTC), reverse=sort_direction == "desc")
+        if sorting.mode == SORTING_MODE_PAGE_ONLY_UNSAFE:
+            records.sort(
+                key=lambda item: item["created_at"] or datetime.min.replace(tzinfo=UTC),
+                reverse=sorting.direction == "desc",
+            )
         return {
             "records": records,
             "next_offset": payload.get("offset") or "",
             "next_query": next_query(query, str(payload.get("offset") or "")),
             "page_size": page_size,
-            "sort": sort_direction,
+            "sort": sorting.direction,
             "filters": query,
             "options": filter_options(metadata),
-            "created_sort_is_exact": bool(created_field or self.settings.dashboard_airtable_view.strip()),
+            "created_sort_is_exact": sorting.is_exact,
+            "sorting_mode": sorting.mode,
         }
 
     def fetch_record(self, record_id: str) -> dict[str, Any]:
@@ -437,11 +457,91 @@ def technical_formula(bindings: dict[str, FieldBinding]) -> str:
     return "OR(" + ",".join(checks) + ")"
 
 
-def resolve_created_time_sort_field(settings: Settings, table: dict[str, Any]) -> str:
-    configured = settings.dashboard_created_time_field.strip()
-    if configured and find_field_metadata(table, configured):
-        return configured
+def configured_sorting_mode(settings: Settings) -> str:
+    if settings.dashboard_airtable_view.strip():
+        return SORTING_MODE_AIRTABLE_VIEW
+    if settings.dashboard_created_time_field.strip():
+        return SORTING_MODE_AIRTABLE_FIELD
+    return SORTING_MODE_PAGE_ONLY_UNSAFE
+
+
+def resolve_sorting_config(settings: Settings, table: dict[str, Any], requested_sort: Any) -> SortingConfig:
+    mode = configured_sorting_mode(settings)
+    requested_direction = "asc" if requested_sort == "asc" else "desc"
+    if mode == SORTING_MODE_AIRTABLE_VIEW:
+        configured_view = settings.dashboard_airtable_view.strip()
+        if not find_view_metadata(table, configured_view):
+            raise AirtableError("Configured dashboard Airtable view was not found")
+        return SortingConfig(
+            mode=SORTING_MODE_AIRTABLE_VIEW,
+            direction="desc",
+            params=(("view", configured_view),),
+            is_exact=True,
+        )
+
+    if mode == SORTING_MODE_AIRTABLE_FIELD:
+        field = find_field_metadata(table, settings.dashboard_created_time_field.strip())
+        if not field:
+            raise AirtableError("Configured dashboard Created time field was not found")
+        if not is_created_time_sort_field(field):
+            raise AirtableError(
+                "Configured dashboard Created time field must use Airtable Created time type "
+                "or CREATED_TIME() formula"
+            )
+        sort_field = str(field.get("name") or settings.dashboard_created_time_field.strip())
+        params: list[tuple[str, str]] = [
+            ("sort[0][field]", sort_field),
+            ("sort[0][direction]", requested_direction),
+        ]
+        secondary = stable_secondary_sort_field(settings, table, exclude=sort_field)
+        if secondary:
+            params.extend(
+                [
+                    ("sort[1][field]", secondary),
+                    ("sort[1][direction]", "asc"),
+                ]
+            )
+        return SortingConfig(
+            mode=SORTING_MODE_AIRTABLE_FIELD,
+            direction=requested_direction,
+            params=tuple(params),
+            is_exact=True,
+        )
+
+    return SortingConfig(mode=SORTING_MODE_PAGE_ONLY_UNSAFE, direction=requested_direction, is_exact=False)
+
+
+def find_view_metadata(table: dict[str, Any], configured_view: str) -> dict[str, Any] | None:
+    if not configured_view:
+        return None
+    for view in table.get("views") or []:
+        if configured_view in {view.get("id"), view.get("name")}:
+            return view
+    return None
+
+
+def stable_secondary_sort_field(settings: Settings, table: dict[str, Any], *, exclude: str) -> str:
+    for candidate in (settings.voice_field_external_id, "External ID", settings.voice_field_title, "Название"):
+        field = find_field_metadata(table, candidate)
+        if not field:
+            continue
+        name = str(field.get("name") or candidate)
+        if name == exclude:
+            continue
+        if field.get("type") in SORT_COMPATIBLE_FIELD_TYPES:
+            return name
     return ""
+
+
+def is_created_time_sort_field(field: dict[str, Any]) -> bool:
+    field_type = field.get("type")
+    if field_type == "createdTime":
+        return True
+    if field_type != "formula":
+        return False
+    formula = str((field.get("options") or {}).get("formula") or "")
+    normalized = re.sub(r"\s+", "", formula).upper()
+    return normalized == "CREATED_TIME()"
 
 
 def local_day_start(now_utc: datetime, timezone_name: str) -> datetime:
