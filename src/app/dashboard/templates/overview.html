@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Обзор Voice Inbox{% endblock %}
+{% block content %}
+  <section class="heading-row">
+    <div>
+      <h1>Обзор</h1>
+      <p class="muted">Время отображается в {{ overview.timezone }}.</p>
+    </div>
+    <a class="button primary" href="/records">Открыть записи</a>
+  </section>
+
+  <section class="metric-grid" aria-label="Сводка">
+    <a class="metric" href="/records">
+      <span class="metric-label">Всего доступно</span>
+      <strong>{{ overview.cards.total }}{% if overview.cards.limited %}+{% endif %}</strong>
+    </a>
+    <a class="metric" href="/records?status=New">
+      <span class="metric-label">New</span>
+      <strong>{{ overview.cards["New"] }}</strong>
+    </a>
+    <a class="metric" href="/records?status=Processing">
+      <span class="metric-label">Processing</span>
+      <strong>{{ overview.cards["Processing"] }}</strong>
+    </a>
+    <a class="metric" href="/processed">
+      <span class="metric-label">Processed</span>
+      <strong>{{ overview.cards["Processed"] }}</strong>
+    </a>
+    <a class="metric urgent" href="/needs-review">
+      <span class="metric-label">Needs Review</span>
+      <strong>{{ overview.cards["Needs Review"] }}</strong>
+    </a>
+    <a class="metric" href="/records?period=today">
+      <span class="metric-label">Сегодня</span>
+      <strong>{{ overview.cards.today }}</strong>
+    </a>
+    <a class="metric" href="/records?period=7d">
+      <span class="metric-label">7 дней</span>
+      <strong>{{ overview.cards.last7 }}</strong>
+    </a>
+    <a class="metric" href="/records?source=Android">
+      <span class="metric-label">Android</span>
+      <strong>{{ overview.cards.Android }}</strong>
+    </a>
+    <a class="metric" href="/records?source=Telegram">
+      <span class="metric-label">Telegram</span>
+      <strong>{{ overview.cards.Telegram }}</strong>
+    </a>
+    <a class="metric urgent" href="/queue">
+      <span class="metric-label">Зависшие</span>
+      <strong>{{ overview.cards.stale }}</strong>
+    </a>
+    <a class="metric" href="/technical">
+      <span class="metric-label">Технические</span>
+      <strong>{{ overview.technical }}</strong>
+    </a>
+  </section>
+
+  {% if overview.cards.limited %}
+    <p class="muted">Сводка ограничена первыми {{ overview.max_records }} записями с ограниченным набором полей.</p>
+  {% endif %}
+{% endblock %}

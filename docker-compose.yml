@@ -10,3 +10,17 @@ services:
       - "127.0.0.1:${HTTP_PUBLISHED_PORT:-8080}:8080"
     volumes:
       - ./data:/app/data
+
+  voice-inbox-dashboard:
+    build: .
+    container_name: voice-inbox-dashboard
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: 8081
+      DASHBOARD_ALLOWED_HOSTS: ${DASHBOARD_ALLOWED_HOSTS:-127.0.0.1,localhost}
+      DASHBOARD_PUBLIC_ORIGIN: ${DASHBOARD_PUBLIC_ORIGIN:-http://127.0.0.1:8081}
+    ports:
+      - "127.0.0.1:${DASHBOARD_PUBLISHED_PORT:-8081}:8081"

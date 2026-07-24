@@ -164,6 +164,151 @@ Android-вход пишет запись в Airtable `Voice Inbox / Inbox`:
 - `GOOGLE_DRIVE_CREDENTIALS_FILE` и `GOOGLE_DRIVE_TOKEN_FILE` — OAuth/service-account файлы внутри контейнера.
 - `GOOGLE_DRIVE_SPOOL_DIR` — локальный защищённый spool на случай временной ошибки Drive.
 
+## Voice Inbox Dashboard
+
+Dashboard — отдельный server-side web-сервис для просмотра `Voice Inbox / Inbox`, записей `Needs Review`, вложений, AI-результатов и ручного исправления структурированных полей. Он не использует Airtable Interface и не отдаёт Airtable PAT в браузер: все Airtable API-запросы выполняются только сервером.
+
+Сервис живёт отдельно от Telegram-бота, Android HTTP API и processor:
+
+```bash
+python -m app.dashboard
+```
+
+В Docker Compose он запускается как отдельный процесс:
+
+```bash
+docker compose up -d --build voice-inbox-dashboard
+```
+
+Локальный health check:
+
+```http
+GET /healthz
+```
+
+По умолчанию локальный адрес — `http://127.0.0.1:8081`. В production порт должен быть опубликован только на loopback host interface, например:
+
+```text
+127.0.0.1:8081 -> container:8081
+```
+
+Dashboard не должен быть открыт firewall rule напрямую. Внешний доступ должен идти через Cloudflare Tunnel и Cloudflare Access. Для `inbox.bruce-group.net` сначала настраивается Access Application и allow policy, затем hostname добавляется в существующий Tunnel на локальный dashboard origin. Не переводите `voice-inbox.bruce-group.net` под интерактивный Access, потому что Android API использует существующую Bearer-авторизацию.
+
+### Dashboard env
+
+Только имена переменных, значения хранятся вне Git:
+
+```env
+DASHBOARD_HOST=127.0.0.1
+DASHBOARD_PORT=8081
+DASHBOARD_PUBLIC_ORIGIN=http://127.0.0.1:8081
+DASHBOARD_ALLOWED_HOSTS=127.0.0.1,localhost
+DASHBOARD_CSRF_SECRET=
+DASHBOARD_PAGE_SIZE=25
+DASHBOARD_OVERVIEW_MAX_RECORDS=1000
+DASHBOARD_MAX_FORM_BYTES=32768
+DASHBOARD_WRITE_RATE_LIMIT_PER_MINUTE=30
+DASHBOARD_AIRTABLE_VIEW=
+DASHBOARD_CREATED_TIME_FIELD=
+DASHBOARD_ATTACHMENT_TIMEOUT_SECONDS=30
+```
+
+`DASHBOARD_CSRF_SECRET` обязателен для запуска dashboard и должен быть случайным значением не короче 32 байт. В production храните его через Bruce Secrets Contract или другой фактически принятый secret storage. Не используйте `MOBILE_INBOX_TOKEN` для dashboard.
+
+`DASHBOARD_PUBLIC_ORIGIN` должен совпадать с внешним origin dashboard, а `DASHBOARD_ALLOWED_HOSTS` — с разрешёнными Host header. Эти значения используются для Host validation и Origin/Referer validation на изменяющих запросах.
+
+### Airtable и сортировка
+
+Dashboard использует существующий `AirtableClient`, текущие env mapping полей и Airtable metadata. Select-варианты для `Проект`, `Тип` и `Приоритет` берутся из metadata, поэтому устаревшие значения не хардкодятся в UI.
+
+Список записей использует Airtable pagination `offset`, `pageSize`, ограниченный набор `fields[]`, server-side formula filters и поиск по текстовым полям. Сводка загружает только ограниченную выборку полей до `DASHBOARD_OVERVIEW_MAX_RECORDS`; если записей больше, UI показывает `+`.
+
+Для точной сортировки по времени через Airtable задайте один из вариантов:
+
+- `DASHBOARD_AIRTABLE_VIEW` — view в Airtable, отсортированный по времени;
+- `DASHBOARD_CREATED_TIME_FIELD` — существующее поле Airtable типа Created Time.
+
+Если ни view, ни поле не заданы, dashboard сортирует по `createdTime` только текущую страницу, не создавая новое поле в Airtable.
+
+### Разделы
+
+- `Обзор` — количество записей, статусы, источники, записи за сегодня/7 дней, зависшие и технические записи.
+- `Последние` — поиск, фильтры, период, сортировка и пагинация.
+- `Needs Review` — карточки для проверки и переход к форме исправления.
+- `New / Processing` — возраст записи: до 5 минут нормальное состояние, 5-15 минут задержка, больше 15 минут требует внимания.
+- `Processed` — компактный список обработанных записей.
+- `Правила` — безопасный просмотр `Правила обработки`; если есть поле `Активно`, правило можно включить или выключить.
+- `Технические` — фильтр по `smoke`, `canary`, `production test`, `TG-SMOKE`, `dashboard-canary`. Такие записи не удаляются автоматически.
+
+### Редактирование
+
+Из формы нельзя передать произвольное Airtable field name. На сервере есть allowlist form keys:
+
+```text
+project
+entry_type
+priority
+due_date
+amount
+counterparty
+period
+next_action
+correction_comment
+```
+
+Каждый ключ мапится на реальное поле Airtable только сервером. Для select-полей проверяются реальные варианты из metadata. Для даты принимается `YYYY-MM-DD` или пустое значение. Для суммы принимается число или пустое значение. Текстовые поля ограничены по длине.
+
+После успешного POST используется Post Redirect Get, поэтому обновление страницы не повторяет сохранение. PATCH в Airtable отправляет только изменённые разрешённые поля и служебные флаги действия.
+
+### Сохранить и обучить
+
+Dashboard не создаёт новый механизм обучения. Кнопка `Сохранить и обучить` обновляет исправленные поля и ставит существующие флаги:
+
+```text
+Обучить на исправлении = true
+Обучение учтено = false
+Комментарий к исправлению = <комментарий пользователя>
+```
+
+Дальше один существующий voice processor в своём обычном цикле подбирает pending corrections, сравнивает текущие поля с `AI результат JSON`, создаёт правило в `Правила обработки`, ставит `Обучение учтено = true` и очищает `Обучить на исправлении`.
+
+### Безопасность
+
+Dashboard включает:
+
+- CSRF token для всех изменяющих запросов;
+- Host validation;
+- Origin/Referer validation для POST;
+- ограничение размера form body;
+- in-memory rate limiting для изменяющих запросов;
+- защитные HTTP-заголовки `Content-Security-Policy`, `Cache-Control: no-store`, `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`, `Permissions-Policy`, `X-Robots-Tag`;
+- `robots.txt` с запретом индексации;
+- выключенный uvicorn access log в dashboard entrypoint;
+- server-side proxy route для Airtable attachments, чтобы attachment URL и PAT не попадали в HTML.
+
+Логи dashboard должны содержать только route, HTTP status, duration, operation type и обезличенный тип ошибки. Не логируйте полный текст заметок, расшифровки, AI JSON, attachment URL или секреты.
+
+### Тесты
+
+Dashboard tests используют fake Airtable client и не обращаются к production Airtable:
+
+```bash
+python -m pytest tests/test_dashboard.py
+python -m pytest
+```
+
+Покрытие включает health endpoint, списки, detail card, пустую таблицу, Airtable error, pagination, filters, search, зависшие записи, валидацию, запрет неизвестных полей, CSRF, Origin/Referer, Host validation, XSS escaping, partial update, `Сохранить`, `Сохранить и обучить`, правила и security headers.
+
+### Диагностика зависших записей
+
+Зависшей считается запись со статусом `New` или `Processing` старше 15 минут. Проверка:
+
+1. Откройте раздел `New / Processing`.
+2. Посмотрите возраст и `Ошибка обработки` в detail card.
+3. Убедитесь, что в production запущен ровно один processor.
+4. Проверьте, что `VOICE_PROCESSOR_ENABLED=true`, `VOICE_PROCESSOR_SOURCE_FILTER` соответствует источнику, а `VOICE_PROCESSOR_CREATED_AFTER` не отсекает запись.
+5. При временной ошибке processor вернёт запись в `New` до лимита retries; после лимита запись уйдёт в `Needs Review`.
+
 ## Google Drive originals
 
 Когда `GOOGLE_DRIVE_ENABLED=true`, для каждого входящего Android или Telegram элемента создаётся папка:

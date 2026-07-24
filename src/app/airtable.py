@@ -104,6 +104,21 @@ class AirtableClient:
             if not offset:
                 return records
 
+    def list_records_page(
+        self,
+        base_id: str,
+        table_id: str,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        page_size: int = 25,
+        offset: str = "",
+    ) -> dict:
+        request_params = list(params or [])
+        request_params.append(("pageSize", str(max(1, min(page_size, 100)))))
+        if offset:
+            request_params.append(("offset", offset))
+        return self._request("GET", base_id, table_id, params=request_params)
+
     def update_record(
         self,
         base_id: str,
@@ -455,6 +470,39 @@ class AirtableClient:
 
     def fetch_voice_record(self, record_id: str) -> dict:
         return self.fetch_record(self.settings.voice_inbox_base_id, self.settings.voice_inbox_table_id, record_id)
+
+    def list_voice_records_page(
+        self,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        page_size: int = 25,
+        offset: str = "",
+    ) -> dict:
+        return self.list_records_page(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            params=params,
+            page_size=page_size,
+            offset=offset,
+        )
+
+    def list_voice_records_limited(
+        self,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        max_records: int = 1000,
+    ) -> tuple[list[dict], bool]:
+        limit = max(1, max_records)
+        records: list[dict] = []
+        offset = ""
+        while len(records) < limit:
+            page_size = min(100, limit - len(records))
+            payload = self.list_voice_records_page(params=params, page_size=page_size, offset=offset)
+            records.extend(payload.get("records") or [])
+            offset = str(payload.get("offset") or "")
+            if not offset:
+                return records, False
+        return records[:limit], bool(offset)
 
     def update_voice_record_fields(self, record_id: str, fields: dict[str, Any]) -> dict:
         return self.update_record(
