@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}
+  {% if section == "needs-review" %}Needs Review{% elif section == "processed" %}Processed{% elif section == "queue" %}New / Processing{% elif section == "technical" %}Технические{% else %}Последние записи{% endif %}
+{% endblock %}
+{% block content %}
+  <section class="heading-row">
+    <div>
+      <h1>
+        {% if section == "needs-review" %}Требуют проверки{% elif section == "processed" %}Обработанные{% elif section == "queue" %}Новые и обрабатываемые{% elif section == "technical" %}Технические записи{% else %}Последние записи{% endif %}
+      </h1>
+      {% if not data.created_sort_is_exact %}
+        <p class="muted">Сортировка по времени применяется к текущей странице. Для точной сортировки через Airtable задайте Created Time field или view.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <form class="filters" method="get" action="{% if section == 'needs-review' %}/needs-review{% elif section == 'processed' %}/processed{% elif section == 'queue' %}/queue{% elif section == 'technical' %}/technical{% else %}/records{% endif %}">
+    <label>
+      <span>Поиск</span>
+      <input name="q" type="search" value="{{ data.filters.q or '' }}" autocomplete="off">
+    </label>
+    {% if section not in ["needs-review", "processed"] %}
+      <label>
+        <span>Статус</span>
+        <select name="status">
+          <option value="">Все</option>
+          {% for option in data.options.statuses %}
+            <option value="{{ option }}" {% if data.filters.status == option %}selected{% endif %}>{{ option }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% endif %}
+    <label>
+      <span>Источник</span>
+      <select name="source">
+        <option value="">Все</option>
+        {% for option in data.options.sources %}
+          <option value="{{ option }}" {% if data.filters.source == option %}selected{% endif %}>{{ option }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Проект</span>
+      <select name="project">
+        <option value="">Все</option>
+        {% for option in data.options.projects %}
+          <option value="{{ option }}" {% if data.filters.project == option %}selected{% endif %}>{{ option }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Тип</span>
+      <select name="entry_type">
+        <option value="">Все</option>
+        {% for option in data.options.types %}
+          <option value="{{ option }}" {% if data.filters.entry_type == option %}selected{% endif %}>{{ option }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Период</span>
+      <select name="period">
+        <option value="">Все</option>
+        <option value="today" {% if data.filters.period == "today" %}selected{% endif %}>Сегодня</option>
+        <option value="7d" {% if data.filters.period == "7d" %}selected{% endif %}>7 дней</option>
+        <option value="30d" {% if data.filters.period == "30d" %}selected{% endif %}>30 дней</option>
+      </select>
+    </label>
+    <label>
+      <span>Сортировка</span>
+      <select name="sort">
+        <option value="desc" {% if data.sort == "desc" %}selected{% endif %}>Сначала новые</option>
+        <option value="asc" {% if data.sort == "asc" %}selected{% endif %}>Сначала старые</option>
+      </select>
+    </label>
+    <label>
+      <span>На странице</span>
+      <select name="page_size">
+        {% for option in [10,25,50] %}
+          <option value="{{ option }}" {% if data.page_size == option %}selected{% endif %}>{{ option }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button class="button primary" type="submit">Применить</button>
+      <a class="button" href="{% if section == 'needs-review' %}/needs-review{% elif section == 'processed' %}/processed{% elif section == 'queue' %}/queue{% elif section == 'technical' %}/technical{% else %}/records{% endif %}">Сброс</a>
+    </div>
+  </form>
+
+  <section class="record-list">
+    {% for record in data.records %}
+      <article class="record-card age-{{ record.age_state }}">
+        <div class="record-main">
+          <div class="record-title-row">
+            <a class="record-title" href="/records/{{ record.id }}">{{ record.title }}</a>
+            <span class="status">{{ record.status or "Без статуса" }}</span>
+          </div>
+          <p class="summary">{{ record.summary or record.clean_text or record.raw_text or "Нет текста" }}</p>
+          <dl class="inline-meta">
+            <div><dt>Создано</dt><dd>{{ record.created_local }}</dd></div>
+            <div><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
+            <div><dt>Тип</dt><dd>{{ record.entry_type or "—" }}</dd></div>
+            <div><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
+            {% if record.age_state in ["delay", "stale"] %}
+              <div><dt>Возраст</dt><dd>{{ record.age_minutes }} мин</dd></div>
+            {% endif %}
+          </dl>
+        </div>
+        <a class="button compact" href="/records/{{ record.id }}">Открыть</a>
+      </article>
+    {% else %}
+      <p class="empty">Записей не найдено.</p>
+    {% endfor %}
+  </section>
+
+  <nav class="pagination" aria-label="Пагинация">
+    <a class="button" href="{% if section == 'needs-review' %}/needs-review{% elif section == 'processed' %}/processed{% elif section == 'queue' %}/queue{% elif section == 'technical' %}/technical{% else %}/records{% endif %}">Первая</a>
+    {% if data.next_offset %}
+      <a class="button primary" href="{{ request.url.path }}?{{ data.next_query }}">Следующая</a>
+    {% endif %}
+  </nav>
+{% endblock %}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <title>{% block title %}Voice Inbox{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
+    <script src="{{ url_for('static', path='/dashboard.js') }}" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">Voice Inbox</a>
+      <nav class="nav" aria-label="Основная навигация">
+        <a href="/records">Последние</a>
+        <a href="/needs-review">Needs Review</a>
+        <a href="/queue">New / Processing</a>
+        <a href="/processed">Processed</a>
+        <a href="/rules">Правила</a>
+        <a href="/technical">Технические</a>
+      </nav>
+    </header>
+    <main class="page">
+      {% if saved %}
+        <p class="notice success">
+          {% if saved == "trained" %}Изменения сохранены, обучение поставлено в очередь processor.{% else %}Изменения сохранены.{% endif %}
+        </p>
+      {% endif %}
+      {% if error %}
+        <p class="notice error">{{ error }}</p>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

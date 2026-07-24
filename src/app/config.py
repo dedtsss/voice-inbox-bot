@@ -110,6 +110,19 @@ class Settings(BaseSettings):
     http_host: str = Field(default="0.0.0.0", alias="HTTP_HOST")
     http_port: int = Field(default=8080, alias="HTTP_PORT")
 
+    dashboard_host: str = Field(default="127.0.0.1", alias="DASHBOARD_HOST")
+    dashboard_port: int = Field(default=8081, alias="DASHBOARD_PORT")
+    dashboard_public_origin: str = Field(default="http://127.0.0.1:8081", alias="DASHBOARD_PUBLIC_ORIGIN")
+    dashboard_allowed_hosts: str = Field(default="127.0.0.1,localhost", alias="DASHBOARD_ALLOWED_HOSTS")
+    dashboard_csrf_secret: str = Field(default="", alias="DASHBOARD_CSRF_SECRET")
+    dashboard_page_size: int = Field(default=25, alias="DASHBOARD_PAGE_SIZE")
+    dashboard_overview_max_records: int = Field(default=1000, alias="DASHBOARD_OVERVIEW_MAX_RECORDS")
+    dashboard_max_form_bytes: int = Field(default=32_768, alias="DASHBOARD_MAX_FORM_BYTES")
+    dashboard_write_rate_limit_per_minute: int = Field(default=30, alias="DASHBOARD_WRITE_RATE_LIMIT_PER_MINUTE")
+    dashboard_airtable_view: str = Field(default="", alias="DASHBOARD_AIRTABLE_VIEW")
+    dashboard_created_time_field: str = Field(default="", alias="DASHBOARD_CREATED_TIME_FIELD")
+    dashboard_attachment_timeout_seconds: int = Field(default=30, alias="DASHBOARD_ATTACHMENT_TIMEOUT_SECONDS")
+
     mobile_inbox_token: str = Field(default="", alias="MOBILE_INBOX_TOKEN")
     android_raw_mode: bool = Field(default=True, alias="ANDROID_RAW_MODE")
     mobile_inbox_max_file_bytes: int = Field(default=5_000_000, alias="MOBILE_INBOX_MAX_FILE_BYTES")
@@ -204,6 +217,14 @@ class Settings(BaseSettings):
         return {
             part.strip().casefold()
             for part in self.mobile_inbox_allowed_mime_types.replace(";", ",").split(",")
+            if part.strip()
+        }
+
+    @property
+    def dashboard_allowed_host_set(self) -> set[str]:
+        return {
+            part.strip().casefold()
+            for part in self.dashboard_allowed_hosts.replace(";", ",").split(",")
             if part.strip()
         }
 

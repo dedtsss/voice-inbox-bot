@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Правила обработки{% endblock %}
+{% block content %}
+  <section class="heading-row">
+    <div>
+      <h1>Правила обработки</h1>
+      {% if data.active_supported %}
+        <p class="muted">Активность меняется через существующее поле `Активно`.</p>
+      {% else %}
+        <p class="muted">В текущей схеме нет поля активности, раздел доступен только для чтения.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="rules-list">
+    {% for rule in data.rules %}
+      <article class="rule-card">
+        <div>
+          <h2>{{ rule.name }}</h2>
+          <dl class="inline-meta">
+            <div><dt>Область</dt><dd>{{ rule.area or "—" }}</dd></div>
+            <div><dt>Проект</dt><dd>{{ rule.project or "—" }}</dd></div>
+            <div><dt>Тип</dt><dd>{{ rule.entry_type or "—" }}</dd></div>
+            <div><dt>Использований</dt><dd>{{ rule.uses if rule.uses is not none else "—" }}</dd></div>
+          </dl>
+          <details>
+            <summary>Условие и решение</summary>
+            <pre class="text-block">{{ rule.condition or "—" }}</pre>
+            <pre class="json-block">{{ rule.decision or "—" }}</pre>
+          </details>
+        </div>
+        {% if data.active_supported %}
+          <form method="post" action="/rules/{{ rule.id }}/active">
+            {{ csrf_input(request)|safe }}
+            <input type="hidden" name="active" value="{% if rule.active %}0{% else %}1{% endif %}">
+            <button class="button compact" type="submit">{% if rule.active %}Выключить{% else %}Включить{% endif %}</button>
+          </form>
+        {% else %}
+          <span class="status">{{ "Активно" if rule.active else "Выключено" }}</span>
+        {% endif %}
+      </article>
+    {% else %}
+      <p class="empty">Правил пока нет.</p>
+    {% endfor %}
+  </section>
+{% endblock %}
