@@ -442,6 +442,7 @@ def test_filters_and_search_build_airtable_formula() -> None:
         ("/needs-review", "{Статус обработки} = 'Needs Review'"),
         ("/processed", "{Статус обработки} = 'Processed'"),
         ("/queue", "OR({Статус обработки} = 'New',{Статус обработки} = 'Processing')"),
+        ("/technical", "SEARCH('smoke'"),
         ("/records?q=invoice", "SEARCH('invoice'"),
     ],
 )
