@@ -26,6 +26,7 @@ def make_settings(tmp_path: Path) -> Settings:
         TELEGRAM_BOT_TOKEN="123:test",
         ALLOWED_TELEGRAM_USER_IDS="1",
         OPENAI_API_KEY="sk-test",
+        VOICE_PROCESSING_ROUTE="openai_api",
         AIRTABLE_TOKEN="pat-test",
         VOICE_INBOX_BASE_ID="appYRukVuHediikiR",
         VOICE_INBOX_TABLE_ID="tblRMsY9zB5tnVfTR",
@@ -204,8 +205,22 @@ def test_android_text_only(tmp_path: Path) -> None:
     assert airtable.created_payloads[0]["external_id"] == "android-text-1"
     assert airtable.created_payloads[0]["google_drive_url"] == "https://drive.google.com/drive/folders/folder-android-text-1"
     assert airtable.created_payloads[0]["processing_status"] == "New"
+    assert airtable.created_payloads[0]["processing_route"] == "OpenAI API"
     assert drive.calls[0]["text"] == "hello from android"
     assert drive.calls[0]["files"] == []
+
+
+def test_health_reports_safe_processing_route(tmp_path: Path) -> None:
+    client, _, _, _ = make_client(tmp_path, FakeDrive())
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "voice_processing_route": "openai_api",
+        "openai_api_processor_enabled": True,
+    }
 
 
 def test_android_mp3(tmp_path: Path) -> None:

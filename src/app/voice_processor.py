@@ -22,7 +22,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.airtable import AirtableClient, AirtableError, ProjectMatch
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, validate_openai_api_configuration
 from app.drive_storage import DriveStorageError, build_google_drive_service, safe_error
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,11 @@ VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".webm"}
 TRANSIENT_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 ATTEMPT_RE = re.compile(r"\battempt=(\d+)\b")
 SECRET_VALUE_RE = re.compile(r"(sk-[A-Za-z0-9_-]+|pat[A-Za-z0-9]+|gh[opsu]_[A-Za-z0-9_]+)")
+BEARER_VALUE_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/\-]+=*", re.IGNORECASE)
+TOKEN_ASSIGNMENT_RE = re.compile(
+    r"((?:access|refresh|client)_token|client_secret|api_key)(['\"]?\s*[:=]\s*)['\"]?[^,'\"\s]+",
+    re.IGNORECASE,
+)
 
 
 class VoiceProcessorError(RuntimeError):
@@ -249,6 +254,12 @@ class GoogleDriveInboxReader:
             )
         return manifest, originals
 
+    def manifest_exists(self, google_drive_url: str) -> bool:
+        folder_id = drive_folder_id_from_url(google_drive_url)
+        if not folder_id:
+            return False
+        return self._find_child(folder_id, "manifest.json") is not None
+
     def _find_child(self, folder_id: str, name: str) -> dict[str, Any] | None:
         escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
         response = (
@@ -384,6 +395,10 @@ class MediaExtractor:
 
 class VoiceProcessorAI:
     def __init__(self, settings: Settings, client: Any | None = None) -> None:
+        if client is None:
+            if not settings.openai_api_processor_enabled:
+                raise RuntimeError("VoiceProcessorAI is available only when VOICE_PROCESSING_ROUTE=openai_api")
+            validate_openai_api_configuration(settings)
         self.settings = settings
         self.client = client if client is not None else AsyncOpenAI(api_key=settings.openai_api_key)
 
@@ -671,9 +686,14 @@ class VoiceInboxProcessor:
 
     async def _handle_processing_exception(self, claim: ProcessingClaim, error: Exception) -> str:
         redacted = redact_secrets(safe_error(error))
+        quota_unavailable = is_insufficient_quota(error)
+        quota_diagnostic = redact_secrets(str(error).replace("\n", " "))[:8000]
         is_transient = is_transient_error(error)
         next_attempt = claim.attempt + 1
-        if is_transient and next_attempt <= self.settings.voice_processor_max_retries:
+        if quota_unavailable:
+            status = "Processing Disabled"
+            result = "failed"
+        elif is_transient and next_attempt <= self.settings.voice_processor_max_retries:
             status = "New"
             result = "retry"
         else:
@@ -684,15 +704,21 @@ class VoiceInboxProcessor:
             claim.record_id,
             {
                 self.settings.voice_field_processing_status: status,
-                self.settings.voice_field_processing_error: (
+                self.settings.voice_field_processing_error: quota_error_history(claim, quota_diagnostic)
+                if quota_unavailable
+                else (
                     f"voice_processor error transient={str(is_transient).lower()} "
                     f"attempt={claim.attempt} max={self.settings.voice_processor_max_retries} "
                     f"lock_id={claim.lock_id} error={redacted}"
                 ),
+                self.settings.voice_field_processing_route: "OpenAI API",
                 self.settings.voice_field_processor_version: self.settings.voice_processor_version,
             },
         )
-        logger.warning("Voice processor failed for %s: %s", claim.record_id, redacted)
+        if quota_unavailable:
+            logger.warning("Voice processor stopped for %s: OpenAI API balance unavailable", claim.record_id)
+        else:
+            logger.warning("Voice processor failed for %s: %s", claim.record_id, redacted)
         return result
 
     async def apply_pending_corrections(self) -> int:
@@ -849,8 +875,14 @@ def should_process_record(record: dict, settings: Settings) -> bool:
         settings.voice_field_processing_status_query_name,
         "Статус обработки",
     )
-    if status in (None, ""):
-        return True
+    route = get_field(
+        fields,
+        settings.voice_field_processing_route,
+        settings.voice_field_processing_route_query_name,
+        "Processing Route",
+    )
+    if clean_string(route, "").casefold() != "openai api":
+        return False
     return clean_string(status, "").casefold() in {"new", "processing"}
 
 
@@ -863,6 +895,15 @@ def should_process_auto_candidate(record: dict, settings: Settings) -> bool:
         "Статус обработки",
     )
     if clean_string(status, "").casefold() != "new":
+        return False
+
+    route = get_field(
+        fields,
+        settings.voice_field_processing_route,
+        settings.voice_field_processing_route_query_name,
+        "Processing Route",
+    )
+    if clean_string(route, "").casefold() != "openai api":
         return False
 
     source_filter = settings.voice_processor_source_filter.strip()
@@ -1566,6 +1607,8 @@ async def retry_async(call, *, max_attempts: int, base_delay: float):
 
 
 def is_transient_error(error: Exception) -> bool:
+    if is_insufficient_quota(error):
+        return False
     if isinstance(error, VoiceProcessorError):
         return error.transient
     if isinstance(error, (AirtableError, DriveStorageError)):
@@ -1577,12 +1620,50 @@ def is_transient_error(error: Exception) -> bool:
     return any(part in name for part in ("timeout", "ratelimit", "apierror", "connection"))
 
 
+def is_insufficient_quota(error: Exception | str) -> bool:
+    values: list[Any] = [error]
+    if not isinstance(error, str):
+        values.extend(
+            [
+                getattr(error, "code", None),
+                getattr(error, "body", None),
+                getattr(error, "message", None),
+            ]
+        )
+        response = getattr(error, "response", None)
+        if response is not None:
+            with contextlib.suppress(Exception):
+                values.append(response.json())
+    for value in values:
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        else:
+            text = str(value or "")
+        if "insufficient_quota" in text.casefold():
+            return True
+    return False
+
+
+def quota_error_history(claim: ProcessingClaim, diagnostic: str) -> str:
+    return (
+        "voice_processor error transient=false permanent=insufficient_quota "
+        f"attempt={claim.attempt} lock_id={claim.lock_id} "
+        f"user_message=Недоступен баланс OpenAI API diagnostic={diagnostic}"
+    )
+
+
 def redact_secrets(text: str) -> str:
-    return SECRET_VALUE_RE.sub("[redacted]", text)
+    redacted = SECRET_VALUE_RE.sub("[redacted]", text)
+    redacted = BEARER_VALUE_RE.sub(r"\1[redacted]", redacted)
+    return TOKEN_ASSIGNMENT_RE.sub(r"\1\2[redacted]", redacted)
 
 
 def make_processor(settings: Settings | None = None) -> VoiceInboxProcessor:
-    return VoiceInboxProcessor(settings or get_settings())
+    resolved = settings or get_settings()
+    if not resolved.openai_api_processor_enabled:
+        raise RuntimeError("Voice processor requires VOICE_PROCESSING_ROUTE=openai_api")
+    validate_openai_api_configuration(resolved)
+    return VoiceInboxProcessor(resolved)
 
 
 async def async_main(argv: list[str] | None = None) -> int:
@@ -1593,15 +1674,20 @@ async def async_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ignore-enabled-flag",
         action="store_true",
-        help="Allow a one-off run even when VOICE_PROCESSOR_ENABLED=false",
+        help="Deprecated compatibility flag; it does not bypass VOICE_PROCESSING_ROUTE",
     )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = get_settings()
-    if not settings.voice_processor_enabled and not args.ignore_enabled_flag:
-        logger.info("VOICE_PROCESSOR_ENABLED=false; exiting without processing")
+    if settings.voice_processor_enabled or args.ignore_enabled_flag:
+        logger.warning(
+            "VOICE_PROCESSOR_ENABLED/--ignore-enabled-flag are deprecated and cannot enable OpenAI API"
+        )
+    if not settings.openai_api_processor_enabled:
+        logger.warning("Voice processor is disabled because VOICE_PROCESSING_ROUTE is not openai_api")
         return 0
+    validate_openai_api_configuration(settings)
 
     processor = make_processor(settings)
     if args.record_id:

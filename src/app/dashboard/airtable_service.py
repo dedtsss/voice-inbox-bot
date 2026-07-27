@@ -24,7 +24,7 @@ from app.airtable import (
     find_field_metadata,
 )
 from app.config import Settings
-from app.voice_processor import allowed_context_from_metadata, get_field
+from app.voice_processor import allowed_context_from_metadata, get_field, is_insufficient_quota
 
 TECHNICAL_PATTERNS = ("smoke", "canary", "production test", "TG-SMOKE", "dashboard-canary")
 TRAINING_STATUSES = ("Pending", "In Progress", "Completed", "Skipped", "Auto Confirmed")
@@ -174,6 +174,7 @@ class DashboardAirtableService:
         params = limited_fields_params(
             [
                 bindings["status"],
+                bindings["processing_route"],
                 bindings["source"],
                 bindings["entry_type"],
                 bindings["project"],
@@ -205,6 +206,8 @@ class DashboardAirtableService:
             "Processing": 0,
             "Processed": 0,
             "Needs Review": 0,
+            "Awaiting Subscription": 0,
+            "Processing Disabled": 0,
             "today": 0,
             "last7": 0,
             "Android": 0,
@@ -237,7 +240,14 @@ class DashboardAirtableService:
             normalized_records.append(item)
             status = item["status"]
             status_counts[status or "Без статуса"] += 1
-            if status in {"New", "Processing", "Processed", "Needs Review"}:
+            if status in {
+                "New",
+                "Processing",
+                "Processed",
+                "Needs Review",
+                "Awaiting Subscription",
+                "Processing Disabled",
+            }:
                 cards[status] += 1
             source = item["source"] or "Без источника"
             source_counts[source] += 1
@@ -342,17 +352,24 @@ class DashboardAirtableService:
         data = self.list_records(kanban_query)
         columns = [
             {
-                "key": "new",
-                "title": "Новые",
-                "status": "New",
-                "hint": "Свежие входящие, которые processor еще не забрал.",
+                "key": "subscription",
+                "title": "Ожидают ChatGPT",
+                "status": "Awaiting Subscription",
+                "hint": "Очередь подписки ChatGPT в Airtable и Google Drive.",
                 "records": [],
             },
             {
                 "key": "processing",
-                "title": "В обработке",
+                "title": "OpenAI API",
                 "status": "Processing",
-                "hint": "Записи, занятые processor или ожидающие завершения.",
+                "hint": "Новые или занятые автоматической обработкой OpenAI API.",
+                "records": [],
+            },
+            {
+                "key": "disabled",
+                "title": "Отключено",
+                "status": "Processing Disabled",
+                "hint": "Оригиналы сохранены, AI-обработка не выполняется.",
                 "records": [],
             },
             {
@@ -383,14 +400,18 @@ class DashboardAirtableService:
                 by_key["training"]["records"].append(record)
                 continue
             status = record.get("status")
-            if status == "Processing":
+            if status == "Awaiting Subscription":
+                by_key["subscription"]["records"].append(record)
+            elif status in {"New", "Processing"}:
                 by_key["processing"]["records"].append(record)
+            elif status == "Processing Disabled":
+                by_key["disabled"]["records"].append(record)
             elif status == "Needs Review":
                 by_key["review"]["records"].append(record)
             elif status == "Processed":
                 by_key["done"]["records"].append(record)
             else:
-                by_key["new"]["records"].append(record)
+                by_key["subscription"]["records"].append(record)
         data["columns"] = columns
         return data
 
@@ -746,12 +767,14 @@ class DashboardAirtableService:
             "source_cards": source_cards,
             "source_counts": overview["source_counts"],
             "status_counts": overview["status_counts"],
+            "processing_mode": self._processing_mode_summary(overview),
         }
 
     def analytics_dashboard(self) -> dict[str, Any]:
         return self.overview()
 
     def settings_dashboard(self) -> dict[str, Any]:
+        overview = self.overview()
         return {
             "timezone": self.settings.timezone,
             "page_size": self.settings.dashboard_page_size,
@@ -764,6 +787,18 @@ class DashboardAirtableService:
             "public_origin_configured": bool(self.settings.dashboard_public_origin.strip()),
             "cloudflare_access_expected": True,
             "editable_keys": EDITABLE_KEYS,
+            "processing_mode": self._processing_mode_summary(overview),
+        }
+
+    def _processing_mode_summary(self, overview: dict[str, Any]) -> dict[str, Any]:
+        mode = self.settings.voice_processing_mode
+        return {
+            "route": mode.route,
+            "airtable_value": mode.airtable_value,
+            "russian_name": mode.russian_name,
+            "description": mode.description,
+            "openai_processor_running": self.settings.openai_api_processor_enabled,
+            "awaiting_subscription": overview["cards"].get("Awaiting Subscription", 0),
         }
 
     def safe_list_rules(self) -> list[dict[str, Any]]:
@@ -813,6 +848,7 @@ def build_field_bindings(settings: Settings, table: dict[str, Any]) -> dict[str,
         "raw_text": ("Исходная фраза", settings.voice_field_raw_text),
         "tags": ("Теги", settings.voice_field_tags),
         "status": ("Статус обработки", settings.voice_field_processing_status),
+        "processing_route": ("Processing Route", settings.voice_field_processing_route),
         "attachments": ("Attachments", settings.voice_field_attachments),
         "notes": ("Notes", settings.voice_field_notes),
         "external_id": ("External ID", settings.voice_field_external_id),
@@ -890,7 +926,31 @@ def normalize_record(record: dict[str, Any], bindings: dict[str, FieldBinding], 
     item["is_technical"] = is_technical_record(item)
     item["ai_confidence_percent"] = ai_confidence_percent(item.get("ai_confidence"))
     item["training_status_effective"] = effective_training_status(item)
+    item["status_display"] = record_status_display(item)
+    processing_error = str(item.get("processing_error") or "")
+    if is_insufficient_quota(processing_error):
+        item["processing_error_summary"] = "Недоступен баланс OpenAI API"
+        item["processing_error_diagnostic"] = processing_error
+    else:
+        item["processing_error_summary"] = processing_error
+        item["processing_error_diagnostic"] = ""
     return item
+
+
+def record_status_display(item: dict[str, Any]) -> str:
+    status = str(item.get("status") or "")
+    route = str(item.get("processing_route") or "")
+    if status == "Needs Review":
+        return "Требуется проверка"
+    if status == "Processed":
+        return "Обработано"
+    if status == "Awaiting Subscription" or route == "ChatGPT Subscription":
+        return "Ожидает обработки ChatGPT"
+    if status == "Processing Disabled" or route == "Disabled":
+        return "Обработка отключена"
+    if route == "OpenAI API" and status in {"New", "Processing"}:
+        return "Обрабатывается через OpenAI API"
+    return status or "Без статуса"
 
 
 def field_value(fields: dict[str, Any], bindings: dict[str, FieldBinding], key: str) -> Any:
@@ -1395,6 +1455,8 @@ def build_records_formula(query: dict[str, str], bindings: dict[str, FieldBindin
             + equals_formula(bindings["status"], "New")
             + ","
             + equals_formula(bindings["status"], "Processing")
+            + ","
+            + equals_formula(bindings["status"], "Awaiting Subscription")
             + ")"
         )
     if not parts:

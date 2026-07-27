@@ -5,14 +5,14 @@
 MVP-логика:
 
 1. Принимает сообщение в Telegram.
-2. Для голосовых скачивает файл и конвертирует через `ffmpeg` в MP3 16 kHz mono.
-3. Распознаёт речь через OpenAI Speech-to-Text.
-4. Чистит и структурирует текст через OpenAI.
+2. Сохраняет оригиналы и `manifest.json` в Google Drive.
+3. Выбирает только явно настроенный `VOICE_PROCESSING_ROUTE`.
+4. В основном режиме `chatgpt_subscription` ставит запись в очередь без OpenAI API.
 5. Всегда пишет запись в Airtable `Voice Inbox`.
 6. Если проект определён уверенно, дополнительно создаёт запись в `Projects OS / Items`.
 7. Возвращает краткую карточку в Telegram.
 8. Принимает записи из Android Dispatcher по HTTPS/HTTP API и сохраняет их в тот же Airtable `Voice Inbox`.
-9. Опционально запускает multimodal processor для Android raw-записей из Google Drive, если `VOICE_PROCESSOR_ENABLED=true`.
+9. Запускает multimodal OpenAI processor только при `VOICE_PROCESSING_ROUTE=openai_api`.
 
 ## Быстрый старт
 
@@ -383,7 +383,7 @@ python -m pytest
 1. Откройте раздел `New / Processing`.
 2. Посмотрите возраст и `Ошибка обработки` в detail card.
 3. Убедитесь, что в production запущен ровно один processor.
-4. Проверьте, что `VOICE_PROCESSOR_ENABLED=true`, `VOICE_PROCESSOR_SOURCE_FILTER` соответствует источнику, а `VOICE_PROCESSOR_CREATED_AFTER` не отсекает запись.
+4. Проверьте, что `VOICE_PROCESSING_ROUTE=openai_api`, `VOICE_PROCESSOR_SOURCE_FILTER` соответствует источнику, а `VOICE_PROCESSOR_CREATED_AFTER` не отсекает запись.
 5. При временной ошибке processor вернёт запись в `New` до лимита retries; после лимита запись уйдёт в `Needs Review`.
 
 ## Google Drive originals
@@ -420,15 +420,25 @@ python -m pytest
 PYTHONPATH=src python scripts/ensure_airtable_fields.py
 ```
 
-Этот script idempotent: он добавляет metadata поля Drive ingest, feedback поля processor, choice `Processing` в `Статус обработки`, таблицу `Правила обработки`, training-поля, training select choices, минимальные варианты `Тип` и таблицу `Таксономия`, если они ещё отсутствуют.
+Этот script idempotent: он добавляет metadata поля Drive ingest, `Processing Route`, служебные queue claim-поля, новые статусы, feedback поля OpenAI processor, таблицу `Правила обработки`, training-поля, training select choices, минимальные варианты `Тип` и таблицу `Таксономия`, если они ещё отсутствуют.
 
-## Multimodal Voice Processor
+## Voice processing routes
 
-Processor живёт в этом же backend и использует существующие Airtable, Google Drive и OpenAI credentials. При `VOICE_PROCESSOR_ENABLED=false` он не создаётся и не запускает Drive/OpenAI код.
+`VOICE_PROCESSING_ROUTE` — единственный переключатель AI-маршрута:
+
+- `chatgpt_subscription` — сохраняет Airtable + Drive, ставит `Processing Route = ChatGPT Subscription` и `Статус обработки = Awaiting Subscription`; OpenAI clients и polling не создаются;
+- `openai_api` — сохраняет `Processing Route = OpenAI API` и разрешает существующие Speech-to-Text, vision, Structured Outputs, correction learning и polling;
+- `disabled` — сохраняет Airtable + Drive, ставит `Processing Route = Disabled` и `Статус обработки = Processing Disabled`.
+
+Пропущенное или неизвестное значение безопасно трактуется как `disabled` с предупреждением. `VOICE_PROCESSOR_ENABLED` deprecated: оно только вызывает предупреждение и никогда не включает OpenAI API. `OPENAI_API_KEY` обязателен и проверяется при запуске только для `openai_api`.
+
+## Multimodal OpenAI API processor
+
+Processor живёт в этом же backend и запускается только при `VOICE_PROCESSING_ROUTE=openai_api`.
 
 Что делает worker:
 
-1. Берёт не больше `VOICE_PROCESSOR_BATCH_SIZE` записей `Voice Inbox / Inbox` со `Статус обработки = New`, `Источник = VOICE_PROCESSOR_SOURCE_FILTER` и, если задано, Airtable `createdTime > VOICE_PROCESSOR_CREATED_AFTER`.
+1. Берёт не больше `VOICE_PROCESSOR_BATCH_SIZE` записей с `Processing Route = OpenAI API`, `Статус обработки = New`, `Источник = VOICE_PROCESSOR_SOURCE_FILTER` и, если задано, Airtable `createdTime > VOICE_PROCESSOR_CREATED_AFTER`.
 2. Claims запись через заранее существующий choice `Processing`, lock trace и bounded attempt count в `Ошибка обработки`.
 3. Читает Drive folder URL, `manifest.json` и потоково скачивает оригиналы во временную директорию с лимитами размера и проверкой size/SHA-256.
 4. Обрабатывает text/audio/photo/video/mixed: audio transcription, vision analysis для images, video audio + representative frames.
@@ -442,11 +452,12 @@ Processor не создаёт Projects OS tasks в первой версии. `V
 
 `VOICE_PROCESSOR_SOURCE_FILTER` по умолчанию равен `Android`. `VOICE_PROCESSOR_CREATED_AFTER` необязателен, но при включении production polling его нужно выставлять в UTC ISO 8601, например `2026-07-19T02:00:00Z`, чтобы не подбирать старый backlog. Некорректный timestamp останавливает запуск.
 
-V1 processor рассчитан строго на один running worker. Текущий lock trace нужен для диагностики, но не является атомарной межпроцессной блокировкой Airtable. Не запускайте второй контейнер, `docker compose --scale`, cron-копию или ручной batch параллельно с включённым `VOICE_PROCESSOR_ENABLED=true`.
+V1 processor рассчитан строго на один running worker. Текущий lock trace нужен для диагностики, но не является атомарной межпроцессной блокировкой Airtable. Не запускайте второй контейнер, `docker compose --scale`, cron-копию или ручной batch параллельно с `VOICE_PROCESSING_ROUTE=openai_api`.
 
 ### Processor env
 
 ```env
+VOICE_PROCESSING_ROUTE=disabled
 VOICE_PROCESSOR_ENABLED=false
 VOICE_PROCESSOR_INTERVAL_SECONDS=60
 VOICE_PROCESSOR_BATCH_SIZE=5
@@ -481,22 +492,23 @@ VOICE_FIELD_TRAIN_ON_CORRECTION=Обучить на исправлении
 VOICE_FIELD_CORRECTION_COMMENT=Комментарий к исправлению
 VOICE_FIELD_TRAINING_APPLIED=Обучение учтено
 VOICE_FIELD_PROCESSING_STATUS_QUERY_NAME=Статус обработки
+VOICE_FIELD_PROCESSING_ROUTE=Processing Route
+VOICE_FIELD_PROCESSING_ROUTE_QUERY_NAME=Processing Route
 ```
 
 ### Commands
 
-Run one disabled no-op check:
+При route, отличном от `openai_api`, команда безопасно завершится без OpenAI-вызовов:
 
 ```bash
 PYTHONPATH=src python -m app.voice_processor --once
 ```
 
-Run exactly one controlled Airtable smoke record while global polling remains disabled:
+Для контролируемого запуска сначала явно установите `VOICE_PROCESSING_ROUTE=openai_api`, затем:
 
 ```bash
 PYTHONPATH=src python -m app.voice_processor \
-  --record-id recXXXXXXXXXXXXXX \
-  --ignore-enabled-flag
+  --record-id recXXXXXXXXXXXXXX
 ```
 
 Run one batch manually:
@@ -504,15 +516,39 @@ Run one batch manually:
 ```bash
 PYTHONPATH=src python -m app.voice_processor \
   --once \
-  --batch-size 1 \
-  --ignore-enabled-flag
+  --batch-size 1
 ```
 
 In Docker:
 
 ```bash
 docker compose run --rm voice-inbox-bot \
-  python -m app.voice_processor --record-id recXXXXXXXXXXXXXX --ignore-enabled-flag
+  python -m app.voice_processor --record-id recXXXXXXXXXXXXXX
+```
+
+### ChatGPT Subscription queue contract
+
+Точный Airtable filter: `Processing Route = ChatGPT Subscription` AND `Статус обработки = Awaiting Subscription` AND `Google Drive != blank` AND `Subscription Queue Claim = blank` AND запись не содержит маркеры `smoke`, `canary`, `production test`, `TG-SMOKE`, `dashboard-canary`. После Airtable filter код дополнительно проверяет наличие `manifest.json` в Drive.
+
+Dry-run ограниченной пачки (не печатает пользовательские тексты, Drive URL или credentials):
+
+```bash
+PYTHONPATH=src python -m app.subscription_queue --batch-size 5 --created-after 2026-07-01T00:00:00Z --dry-run
+```
+
+Получить и claim следующую пачку:
+
+```bash
+PYTHONPATH=src python -m app.subscription_queue --batch-size 5 --created-after 2026-07-01T00:00:00Z --claim
+```
+
+Внутренний `SubscriptionQueue.load_bundle()` возвращает Airtable record ID, External ID, источник, тип, дату, исходный текст (если есть), Drive folder URL, разобранный `manifest.json` и проверенные оригинальные файлы. Публичный API для очереди не создаётся.
+
+Quota migration:
+
+```bash
+PYTHONPATH=src python scripts/migrate_insufficient_quota.py --dry-run
+PYTHONPATH=src python scripts/migrate_insufficient_quota.py --apply
 ```
 
 ### Correction learning UX
@@ -525,14 +561,14 @@ docker compose run --rm voice-inbox-bot \
 
 ### Safe deploy
 
-1. Merge and deploy with `VOICE_PROCESSOR_ENABLED=false`.
-2. Run `PYTHONPATH=src python scripts/ensure_airtable_fields.py` once with an Airtable token that has schema permissions, so `Processing` is an explicit existing select choice.
+1. Merge and deploy with `VOICE_PROCESSING_ROUTE=disabled` или `chatgpt_subscription`.
+2. Run `PYTHONPATH=src python scripts/ensure_airtable_fields.py` once with an Airtable token that has schema permissions.
 3. Restart the container and verify Telegram plus `/health`.
 4. Create or choose one controlled smoke record with Drive originals.
-5. Run the one-record command with `--record-id ... --ignore-enabled-flag`.
+5. Только для проверки OpenAI API явно переключите route и run one-record command with `--record-id ...`.
 6. Confirm same Airtable record was updated, `AI результат JSON` is present, temp media is gone, and no duplicate processing happened.
 7. Confirm there is only one processor instance for the deployment.
-8. Only after smoke passes, set `VOICE_PROCESSOR_ENABLED=true` with `VOICE_PROCESSOR_BATCH_SIZE=1`, then increase cautiously.
+8. Only after OpenAI smoke passes, keep `VOICE_PROCESSING_ROUTE=openai_api` with `VOICE_PROCESSOR_BATCH_SIZE=1`, then increase cautiously.
 
 ### Rollback
 
@@ -545,7 +581,7 @@ docker compose up -d --build
 Fast disable without code rollback:
 
 ```bash
-VOICE_PROCESSOR_ENABLED=false
+VOICE_PROCESSING_ROUTE=disabled
 docker compose up -d
 ```
 

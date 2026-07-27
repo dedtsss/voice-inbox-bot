@@ -8,7 +8,7 @@
       <span class="eyebrow">{{ icons.icon("file") }}Record detail</span>
       <h1>{{ record.title }}</h1>
       <div class="review-meta">
-        {{ records.status_pill(record.status) }}
+        {{ records.status_pill(record.status, record.status_display) }}
         <span>{{ record.id }}</span>
         <span>{{ record.created_local }}</span>
         {% if record.ai_confidence_percent is not none %}<span>AI {{ record.ai_confidence_percent }}%</span>{% endif %}
@@ -42,8 +42,8 @@
         <dl class="field-list">
           <div><dt>Краткое содержание</dt><dd>{{ record.summary or "—" }}</dd></div>
           <div><dt>Следующее действие</dt><dd>{{ record.next_action or "—" }}</dd></div>
-          {% if record.processing_error %}
-            <div class="danger-row"><dt>Ошибка обработки</dt><dd>{{ record.processing_error }}</dd></div>
+          {% if record.processing_error_summary %}
+            <div class="danger-row"><dt>Ошибка обработки</dt><dd>{{ record.processing_error_summary }}</dd></div>
           {% endif %}
         </dl>
       </article>
@@ -89,6 +89,12 @@
         <summary>{{ icons.icon("database") }}<span>Технический AI JSON</span></summary>
         <pre class="json-block">{{ record.ai_json_pretty or "—" }}</pre>
       </details>
+      {% if record.processing_error_diagnostic %}
+        <details class="panel technical-json">
+          <summary>{{ icons.icon("alert") }}<span>Техническая диагностика OpenAI</span></summary>
+          <pre class="json-block">{{ record.processing_error_diagnostic }}</pre>
+        </details>
+      {% endif %}
     </div>
 
     <aside class="detail-side">
@@ -103,6 +109,7 @@
           <div><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
           <div><dt>Тип</dt><dd>{{ record.entry_type or "—" }}</dd></div>
           <div><dt>Статус</dt><dd>{{ record.status or "—" }}</dd></div>
+          <div><dt>Маршрут обработки</dt><dd>{{ record.processing_route or "—" }}</dd></div>
           <div><dt>External ID</dt><dd>{{ record.external_id or "—" }}</dd></div>
           <div><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
           <div><dt>Приоритет</dt><dd>{{ record.priority or "—" }}</dd></div>

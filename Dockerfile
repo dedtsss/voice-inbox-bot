@@ -16,6 +16,7 @@ RUN pip install -r requirements.txt
 
 COPY src ./src
 COPY data ./data
+COPY scripts ./scripts
 
 EXPOSE 8080
 

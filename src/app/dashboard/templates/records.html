@@ -2,14 +2,14 @@
 {% import "partials/icons.html" as icons %}
 {% import "partials/record_macros.html" as records %}
 {% block title %}
-  {% if section == "processed" %}Обработанные{% elif section == "queue" %}Очередь{% elif section == "technical" %}Технические{% else %}Входящие{% endif %}
+    {% if section == "processed" %}Обработанные{% elif section == "queue" %}Очереди обработки{% elif section == "technical" %}Технические{% else %}Входящие{% endif %}
 {% endblock %}
 {% block content %}
   <section class="page-hero compact">
     <div>
       <span class="eyebrow">{{ icons.icon("inbox") }}Records</span>
       <h1>
-        {% if section == "processed" %}Обработанные записи{% elif section == "queue" %}Новые и обрабатываемые{% elif section == "technical" %}Технические записи{% else %}Входящие записи{% endif %}
+        {% if section == "processed" %}Обработанные записи{% elif section == "queue" %}Очереди ChatGPT и OpenAI API{% elif section == "technical" %}Технические записи{% else %}Входящие записи{% endif %}
       </h1>
       {% if not data.created_sort_is_exact %}
         <p class="muted">Сортировка по времени применяется к текущей странице. Для точной сортировки через Airtable задайте Created Time field или view.</p>

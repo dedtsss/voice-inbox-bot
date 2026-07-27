@@ -253,18 +253,23 @@ class FakeAirtable:
             return records
         equals = re.findall(r"\{([^}]+)\} = '([^']*)'", formula)
         for field_name, value in equals:
-            if "OR(" in formula and field_name == "Статус обработки" and value in {"New", "Processing"}:
+            if "OR(" in formula and field_name == "Статус обработки" and value in {
+                "New",
+                "Processing",
+                "Awaiting Subscription",
+            }:
                 continue
             if "OR(" in formula and field_name == "Статус обработки" and value in {"", "Processed", "Needs Review", "New"}:
                 continue
             if "OR(" in formula and field_name == "Training Status" and value in {"", "Pending", "In Progress"}:
                 continue
             records = [record for record in records if str(record.get("fields", {}).get(field_name) or "") == value]
-        if "OR({Статус обработки} = 'New',{Статус обработки} = 'Processing')" in formula:
+        if "OR({Статус обработки} = 'New',{Статус обработки} = 'Processing'" in formula:
             records = [
                 record
                 for record in records
-                if str(record.get("fields", {}).get("Статус обработки") or "") in {"New", "Processing"}
+                if str(record.get("fields", {}).get("Статус обработки") or "")
+                in {"New", "Processing", "Awaiting Subscription"}
             ]
         match = re.search(r"SEARCH\('([^']+)'", formula)
         if match:
@@ -376,6 +381,74 @@ def test_new_dashboard_sections_render() -> None:
         response = client.get(path)
         assert response.status_code == 200
         assert marker in response.text
+
+
+def test_settings_shows_active_route_queue_count_and_no_secrets(caplog: pytest.LogCaptureFixture) -> None:
+    record = make_record(
+        "recSubscription1",
+        **{
+            "Название": "Private queue item",
+            "Статус обработки": "Awaiting Subscription",
+            "Processing Route": "ChatGPT Subscription",
+        },
+    )
+    caplog.set_level(logging.WARNING)
+    client, _ = make_client(
+        FakeAirtable(records=[record]),
+        VOICE_PROCESSING_ROUTE="chatgpt_subscription",
+        OPENAI_API_KEY="sk-proj-super-secret-value",
+        AIRTABLE_TOKEN="patSuperSecretValue",
+    )
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "chatgpt_subscription" in response.text
+    assert "Подписка ChatGPT" in response.text
+    assert "Ожидают ChatGPT" in response.text
+    assert ">1<" in response.text
+    assert "Не запущен" in response.text
+    assert "sk-proj-super-secret-value" not in response.text
+    assert "patSuperSecretValue" not in response.text
+    assert "sk-proj-super-secret-value" not in caplog.text
+    assert "patSuperSecretValue" not in caplog.text
+
+
+def test_record_cards_use_route_specific_russian_status() -> None:
+    record = make_record(
+        "recSubscription2",
+        **{
+            "Статус обработки": "Awaiting Subscription",
+            "Processing Route": "ChatGPT Subscription",
+        },
+    )
+    client, _ = make_client(FakeAirtable(records=[record]), VOICE_PROCESSING_ROUTE="chatgpt_subscription")
+
+    response = client.get("/records")
+
+    assert response.status_code == 200
+    assert "Ожидает обработки ChatGPT" in response.text
+
+
+def test_quota_error_has_short_message_and_collapsible_diagnostic() -> None:
+    diagnostic = "voice_processor insufficient_quota private diagnostic payload"
+    record = make_record(
+        "recQuotaDetail",
+        **{
+            "Статус обработки": "Processing Disabled",
+            "Processing Route": "OpenAI API",
+            "Ошибка обработки": diagnostic,
+        },
+    )
+    client, _ = make_client(FakeAirtable(records=[record]), VOICE_PROCESSING_ROUTE="openai_api")
+
+    response = client.get("/records/recQuotaDetail")
+
+    assert response.status_code == 200
+    assert "Недоступен баланс OpenAI API" in response.text
+    assert "<details" in response.text
+    assert "Техническая диагностика OpenAI" in response.text
+    assert diagnostic in response.text
 
 
 def test_kanban_page_uses_real_record_data() -> None:
@@ -535,7 +608,10 @@ def test_filters_and_search_build_airtable_formula() -> None:
         ("/records?status=New", "{Статус обработки} = 'New'"),
         ("/needs-review", "{Статус обработки} = 'Needs Review'"),
         ("/processed", "{Статус обработки} = 'Processed'"),
-        ("/queue", "OR({Статус обработки} = 'New',{Статус обработки} = 'Processing')"),
+        (
+            "/queue",
+            "OR({Статус обработки} = 'New',{Статус обработки} = 'Processing',{Статус обработки} = 'Awaiting Subscription')",
+        ),
         ("/technical", "SEARCH('smoke'"),
         ("/records?q=invoice", "SEARCH('invoice'"),
     ],

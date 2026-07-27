@@ -5,11 +5,14 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from app.config import Settings
+from app.config import Settings, validate_openai_api_configuration
 
 
 class OpenAIProcessor:
     def __init__(self, settings: Settings) -> None:
+        if not settings.openai_api_processor_enabled:
+            raise RuntimeError("OpenAIProcessor is available only when VOICE_PROCESSING_ROUTE=openai_api")
+        validate_openai_api_configuration(settings)
         self.settings = settings
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
 

@@ -20,7 +20,7 @@
           <div>
             <a class="record-title" href="/records/{{ record.id }}">{{ record.title }}</a>
             <div class="review-meta">
-              {{ records.status_pill(record.status) }}
+              {{ records.status_pill(record.status, record.status_display) }}
               <span>{{ record.source or "—" }}</span>
               <span>{{ record.project or "Без проекта" }}</span>
               <span>{{ record.created_local }}</span>
@@ -43,8 +43,8 @@
             <div class="summary-panel">
               <h3>Summary</h3>
               <p>{{ record.summary or "—" }}</p>
-              {% if record.processing_error %}
-                <p class="inline-alert">{{ icons.icon("alert") }}{{ record.processing_error }}</p>
+              {% if record.processing_error_summary %}
+                <p class="inline-alert">{{ icons.icon("alert") }}{{ record.processing_error_summary }}</p>
               {% endif %}
             </div>
           </section>

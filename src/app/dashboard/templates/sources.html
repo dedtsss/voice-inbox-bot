@@ -11,6 +11,20 @@
     </div>
   </section>
 
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>{{ data.processing_mode.russian_name }}</h2>
+        <p class="muted">{{ data.processing_mode.description }}</p>
+      </div>
+    </div>
+    <dl class="field-list dense">
+      <div><dt>Processing Route</dt><dd>{{ data.processing_mode.airtable_value }}</dd></div>
+      <div><dt>OpenAI API processor</dt><dd>{{ "Запущен" if data.processing_mode.openai_processor_running else "Не запущен" }}</dd></div>
+      <div><dt>Ожидают ChatGPT</dt><dd>{{ data.processing_mode.awaiting_subscription }}</dd></div>
+    </dl>
+  </section>
+
   <section class="metric-grid">
     <a class="metric accent-green" href="/records?source=Android">
       <span class="metric-label">Android</span>
