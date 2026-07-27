@@ -21,9 +21,9 @@ from app.airtable import AirtableClient, AirtableError
 from app.config import Settings
 from app.drive_storage import (
     DriveStorage,
-    DriveStorageError,
+    DriveSpoolError,
     DriveUploadFile,
-    build_drive_storage,
+    build_drive_storage_fail_safe,
     safe_error,
     spool_drive_item,
     utc_now,
@@ -50,9 +50,17 @@ def create_mobile_api(
     settings: Settings,
     airtable: AirtableClient,
     drive_storage: DriveStorage | None = None,
+    *,
+    drive_unavailable_error: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Voice Inbox", version="1.1.0")
-    resolved_drive_storage = drive_storage if drive_storage is not None else build_drive_storage(settings)
+    if drive_storage is None and drive_unavailable_error is None:
+        drive_state = build_drive_storage_fail_safe(settings)
+        resolved_drive_storage = drive_state.storage
+        resolved_drive_error = drive_state.error
+    else:
+        resolved_drive_storage = drive_storage
+        resolved_drive_error = drive_unavailable_error
 
     @app.get("/health")
     async def health() -> dict[str, str | bool]:
@@ -60,6 +68,7 @@ def create_mobile_api(
             "ok": True,
             "voice_processing_route": settings.effective_voice_processing_route,
             "openai_api_processor_enabled": settings.openai_api_processor_enabled,
+            "google_drive_available": resolved_drive_storage is not None,
         }
 
     @app.post("/api/mobile-inbox/items", response_model=None)
@@ -87,10 +96,33 @@ def create_mobile_api(
 
         existing = await asyncio.to_thread(airtable.find_voice_record_by_external_id, item_id)
         if existing:
+            existing_status = _existing_record_field(
+                existing,
+                settings.voice_field_processing_status,
+                settings.voice_field_processing_status_query_name,
+                "Статус обработки",
+                "processing_status",
+            )
+            existing_drive_url = _existing_record_field(
+                existing,
+                settings.voice_field_google_drive,
+                "Google Drive",
+                "google_drive_url",
+            )
+            if str(existing_status or "").strip() == "Needs Review" and not str(existing_drive_url or "").strip():
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "ok": False,
+                        "remote_id": str(existing.get("id")),
+                        "status": "drive_upload_failed",
+                        "error": "Google Drive upload is pending; original is stored in the local spool",
+                    },
+                )
             return {"ok": True, "remote_id": str(existing.get("id")), "status": "stored"}
 
         drive_url: str | None = None
-        drive_error: str | None = None
+        drive_error: str | None = resolved_drive_error
         drive_files = [
             DriveUploadFile(name=file.filename, mime_type=file.content_type, content=file.content)
             for file in mobile_files
@@ -108,25 +140,39 @@ def create_mobile_api(
                     extra={"payload": _safe_payload_for_manifest(payload)},
                 )
                 drive_url = stored_item.folder_url
-            except DriveStorageError as exc:
+                drive_error = None
+            except Exception as exc:
                 drive_error = safe_error(exc)
-                try:
-                    spool_path = await asyncio.to_thread(
-                        spool_drive_item,
-                        settings=settings,
-                        item_id=item_id,
-                        created_at=created_at,
-                        source="android",
-                        message_type=message_type,
-                        text=text or None,
-                        files=drive_files,
-                        error=drive_error,
-                        extra={"payload": _safe_payload_for_manifest(payload)},
-                    )
-                    drive_error = f"{drive_error}; spooled={spool_path}"
-                except Exception as spool_exc:
-                    logger.exception("Could not spool mobile inbox item %s after Google Drive failure", item_id)
-                    drive_error = f"{drive_error}; spool_failed={safe_error(spool_exc)}"
+        if drive_error:
+            drive_error = safe_error(drive_error)
+            try:
+                spool_path = await asyncio.to_thread(
+                    spool_drive_item,
+                    settings=settings,
+                    item_id=item_id,
+                    created_at=created_at,
+                    source="android",
+                    message_type=message_type,
+                    text=text or None,
+                    files=drive_files,
+                    error=drive_error,
+                    extra={"payload": _safe_payload_for_manifest(payload)},
+                )
+                drive_error = f"{drive_error}; spooled={spool_path}"
+            except Exception as spool_exc:
+                logger.error("Could not spool mobile inbox item %s after Google Drive failure", item_id)
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "ok": False,
+                        "status": "drive_spool_failed",
+                        "error": safe_error(
+                            DriveSpoolError(
+                                f"Google Drive and local spool are unavailable: {safe_error(spool_exc)}"
+                            )
+                        ),
+                    },
+                ) from None
 
         try:
             record = await asyncio.to_thread(
@@ -201,6 +247,14 @@ def create_mobile_api(
         return {"ok": True, "remote_id": record_id, "status": "stored"}
 
     return app
+
+
+def _existing_record_field(record: dict[str, Any], *names: str) -> Any:
+    fields = record.get("fields") or {}
+    for name in names:
+        if name and name in fields:
+            return fields[name]
+    return None
 
 
 def _check_authorization(authorization: str | None, settings: Settings) -> None:

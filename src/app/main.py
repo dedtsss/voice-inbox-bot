@@ -25,9 +25,10 @@ from app.config import (
 )
 from app.drive_storage import (
     DriveStorage,
-    DriveStorageError,
+    DriveStorageState,
+    DriveSpoolError,
     DriveUploadFile,
-    build_drive_storage,
+    build_drive_storage_fail_safe,
     safe_error,
     spool_drive_item,
     utc_now,
@@ -406,43 +407,46 @@ async def store_telegram_originals(
     settings: Settings,
     drive_storage: DriveStorage | None,
     content: IncomingContent,
+    drive_unavailable_error: str | None = None,
 ) -> IncomingContent:
-    if not drive_storage:
-        return content
-
     created_at = utc_now()
-    try:
-        stored_item = await asyncio.to_thread(
-            drive_storage.store_item,
-            item_id=content.item_id,
-            created_at=created_at,
-            source="telegram",
-            message_type=content.message_type,
-            text=content.raw_text or None,
-            files=content.files,
-            extra={"temporary_files": len(content.temp_paths)},
-        )
-        return replace(content, google_drive_url=stored_item.folder_url)
-    except DriveStorageError as exc:
-        drive_error = safe_error(exc)
+    drive_error = drive_unavailable_error
+    if drive_storage:
         try:
-            spool_path = await asyncio.to_thread(
-                spool_drive_item,
-                settings=settings,
+            stored_item = await asyncio.to_thread(
+                drive_storage.store_item,
                 item_id=content.item_id,
                 created_at=created_at,
                 source="telegram",
                 message_type=content.message_type,
                 text=content.raw_text or None,
                 files=content.files,
-                error=drive_error,
                 extra={"temporary_files": len(content.temp_paths)},
             )
-            drive_error = f"{drive_error}; spooled={spool_path}"
-        except Exception as spool_exc:
-            logger.exception("Could not spool Telegram item %s after Google Drive failure", content.item_id)
-            drive_error = f"{drive_error}; spool_failed={safe_error(spool_exc)}"
-        return replace(content, processing_error=drive_error)
+            return replace(content, google_drive_url=stored_item.folder_url)
+        except Exception as exc:
+            drive_error = safe_error(exc)
+    drive_error = safe_error(drive_error or "Google Drive storage is unavailable")
+    try:
+        spool_path = await asyncio.to_thread(
+            spool_drive_item,
+            settings=settings,
+            item_id=content.item_id,
+            created_at=created_at,
+            source="telegram",
+            message_type=content.message_type,
+            text=content.raw_text or None,
+            files=content.files,
+            error=drive_error,
+            extra={"temporary_files": len(content.temp_paths)},
+        )
+        drive_error = f"{drive_error}; spooled={spool_path}"
+    except Exception as spool_exc:
+        logger.error("Could not spool Telegram item %s after Google Drive failure", content.item_id)
+        raise DriveSpoolError(
+            f"Google Drive and local spool are unavailable: {safe_error(spool_exc)}"
+        ) from None
+    return replace(content, processing_error=drive_error)
 
 
 def cleanup_temp_paths(settings: Settings, paths: list[Path]) -> None:
@@ -483,6 +487,15 @@ def format_unprocessed_reply(settings: Settings, voice_record: dict) -> str:
     return f"Сохранено во входящие.\n{state}\nЗапись Voice Inbox: {voice_record.get('id', 'создана')}"
 
 
+def format_drive_failure_reply(voice_record: dict) -> str:
+    return (
+        "Сохранено во входящие.\n"
+        "Google Drive временно недоступен; оригинал сохранён в защищённый локальный spool.\n"
+        "Требуется проверка хранения.\n"
+        f"Запись Voice Inbox: {voice_record.get('id', 'создана')}"
+    )
+
+
 def local_timestamp(settings: Settings) -> str:
     try:
         tzinfo = ZoneInfo(settings.timezone)
@@ -491,14 +504,19 @@ def local_timestamp(settings: Settings) -> str:
     return datetime.now(tzinfo).strftime("%Y%m%d_%H%M%S")
 
 
-async def build_dispatcher(settings: Settings, bot: Bot) -> Dispatcher:
+async def build_dispatcher(
+    settings: Settings,
+    bot: Bot,
+    drive_state: DriveStorageState | None = None,
+) -> Dispatcher:
     router = Router()
     openai_processor: OpenAIProcessor | None = None
     if settings.effective_voice_processing_route == VOICE_PROCESSING_ROUTE_OPENAI_API:
         validate_openai_api_configuration(settings)
         openai_processor = OpenAIProcessor(settings)
     airtable = AirtableClient(settings)
-    drive_storage = build_drive_storage(settings)
+    resolved_drive_state = drive_state or build_drive_storage_fail_safe(settings)
+    drive_storage = resolved_drive_state.storage
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
@@ -525,8 +543,16 @@ async def build_dispatcher(settings: Settings, bot: Bot) -> Dispatcher:
             if not content.raw_text.strip() and not content.files:
                 await status.edit_text("Не нашёл текст для сохранения.")
                 return
-            content = await store_telegram_originals(settings, drive_storage, content)
-            if openai_processor is not None:
+            content = await store_telegram_originals(
+                settings,
+                drive_storage,
+                content,
+                resolved_drive_state.error,
+            )
+            if content.processing_error:
+                voice_record = await asyncio.to_thread(save_unprocessed_to_airtable, airtable, settings, content)
+                await status.edit_text(format_drive_failure_reply(voice_record))
+            elif openai_processor is not None:
                 structured = await openai_processor.structure_text(content.raw_text, content.message_type)
                 voice_record, item_record, project = await asyncio.to_thread(
                     save_to_airtable,
@@ -539,6 +565,10 @@ async def build_dispatcher(settings: Settings, bot: Bot) -> Dispatcher:
             else:
                 voice_record = await asyncio.to_thread(save_unprocessed_to_airtable, airtable, settings, content)
                 await status.edit_text(format_unprocessed_reply(settings, voice_record))
+        except DriveSpoolError:
+            logger.error("Telegram original could not be saved to Google Drive or local spool")
+            content = None
+            await status.edit_text("Не удалось безопасно сохранить оригинал. Повторите отправку.")
         except AirtableError:
             logger.exception("Airtable write failed")
             await status.edit_text("Не удалось записать в Airtable. Проверь логи бота.")
@@ -558,9 +588,18 @@ async def build_dispatcher(settings: Settings, bot: Bot) -> Dispatcher:
     return dispatcher
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    drive_state: DriveStorageState | None = None,
+) -> FastAPI:
     resolved_settings = settings or get_settings()
-    return create_mobile_api(resolved_settings, AirtableClient(resolved_settings))
+    resolved_drive_state = drive_state or build_drive_storage_fail_safe(resolved_settings)
+    return create_mobile_api(
+        resolved_settings,
+        AirtableClient(resolved_settings),
+        resolved_drive_state.storage,
+        drive_unavailable_error=resolved_drive_state.error,
+    )
 
 
 async def run_telegram_polling(settings: Settings, bot: Bot, dispatcher: Dispatcher) -> None:
@@ -608,9 +647,15 @@ async def main() -> None:
     settings.data_path.mkdir(parents=True, exist_ok=True)
     (settings.data_path / "incoming").mkdir(parents=True, exist_ok=True)
 
+    drive_state = build_drive_storage_fail_safe(settings)
+    if not drive_state.available:
+        logger.error(
+            "Google Drive is unavailable; ingest will spool originals and mark records Needs Review: %s",
+            drive_state.error,
+        )
     bot = Bot(token=settings.telegram_bot_token)
-    dispatcher = await build_dispatcher(settings, bot)
-    app = create_app(settings)
+    dispatcher = await build_dispatcher(settings, bot, drive_state)
+    app = create_app(settings, drive_state)
     config = uvicorn.Config(app, host=settings.http_host, port=settings.http_port, log_level="info")
     server = uvicorn.Server(config)
     server.install_signal_handlers = lambda: None
