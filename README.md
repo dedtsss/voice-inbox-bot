@@ -388,6 +388,21 @@ python -m pytest
 
 ## Google Drive originals
 
+### Drive fail-safe
+
+Google Drive является обязательным хранилищем оригиналов для записей, которые должны попасть в AI-очередь. Если Drive отключён, не инициализировался или вернул любую ошибку API:
+
+- backend продолжает принимать Android и Telegram ingest;
+- оригинальные файлы и `manifest.json` сохраняются в закрытый локальный `GOOGLE_DRIVE_SPOOL_DIR`;
+- Airtable-запись сохраняет выбранный `Processing Route`, но получает `Статус обработки = Needs Review` без Drive URL;
+- запись не попадает в ChatGPT Subscription или OpenAI polling queue;
+- Android получает `502 drive_upload_failed`, поэтому источник не принимает ошибку хранения за успешную доставку;
+- повтор того же `item_id` остаётся ошибкой хранения, пока запись не восстановлена, и не создаёт дубликат.
+
+Если одновременно недоступны Drive и локальный spool, Android получает `503 drive_spool_failed`, а вводящая в заблуждение Airtable-запись не создаётся. Telegram просит повторить отправку и не удаляет уже скачанный временный оригинал.
+
+Ошибка инициализации Drive не останавливает Telegram polling и Android API. Техническое сообщение очищается от token/key values перед записью в Airtable, HTTP-ответом или логированием. Локальный spool — аварийная копия, а не замена Drive; его нужно перенести в Drive и обновить запись отдельной recovery-задачей.
+
 Когда `GOOGLE_DRIVE_ENABLED=true`, для каждого входящего Android или Telegram элемента создаётся папка:
 
 ```text

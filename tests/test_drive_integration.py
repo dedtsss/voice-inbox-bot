@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -14,6 +15,7 @@ from app.drive_storage import (
     DriveStoredFile,
     DriveStoredItem,
     DriveUploadFile,
+    build_drive_storage_fail_safe,
     build_manifest,
     folder_url,
 )
@@ -65,6 +67,7 @@ def make_settings(tmp_path: Path) -> Settings:
 @dataclass
 class FakeDrive:
     fail: bool = False
+    failure: Exception | None = None
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     def store_item(
@@ -88,6 +91,8 @@ class FakeDrive:
                 "extra": extra,
             }
         )
+        if self.failure is not None:
+            raise self.failure
         if self.fail:
             raise DriveStorageError("temporary Drive error refresh_token=secret-refresh-token")
         folder_id = f"folder-{item_id}"
@@ -220,6 +225,7 @@ def test_health_reports_safe_processing_route(tmp_path: Path) -> None:
         "ok": True,
         "voice_processing_route": "openai_api",
         "openai_api_processor_enabled": True,
+        "google_drive_available": True,
     }
 
 
@@ -324,6 +330,107 @@ def test_google_drive_error_spools_and_returns_error(tmp_path: Path) -> None:
     assert (spool_dirs[0] / "a.txt").read_bytes() == b"hello"
 
 
+def test_unexpected_google_api_error_also_spools_and_returns_error(tmp_path: Path) -> None:
+    drive = FakeDrive(failure=RuntimeError("HTTP 503 authorization=private-drive-token"))
+    client, settings, airtable, _ = make_client(tmp_path, drive)
+
+    response = post_item(
+        client,
+        settings,
+        {"item_id": "unexpected-drive-error", "text": "spool me"},
+        [("voice.ogg", b"ogg", "audio/ogg")],
+    )
+
+    assert response.status_code == 502
+    assert response.json()["status"] == "drive_upload_failed"
+    assert "private-drive-token" not in response.text
+    assert airtable.created_payloads[0]["processing_status"] == "Needs Review"
+    spool_dirs = list((tmp_path / "spool").iterdir())
+    assert len(spool_dirs) == 1
+    assert (spool_dirs[0] / "voice.ogg").read_bytes() == b"ogg"
+
+
+def test_drive_disabled_never_creates_subscription_queue_record_without_manifest(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.voice_processing_route = "chatgpt_subscription"
+    airtable = FakeAirtable()
+    app = create_mobile_api(
+        settings,
+        airtable,
+        None,
+        drive_unavailable_error="Google Drive storage is disabled",
+    )
+    client = TestClient(app)
+
+    response = post_item(
+        client,
+        settings,
+        {"item_id": "drive-disabled", "text": "preserve locally"},
+        [("voice.ogg", b"ogg", "audio/ogg")],
+    )
+
+    assert response.status_code == 502
+    assert response.json()["status"] == "drive_upload_failed"
+    assert airtable.created_payloads[0]["processing_route"] == "ChatGPT Subscription"
+    assert airtable.created_payloads[0]["processing_status"] == "Needs Review"
+    assert airtable.created_payloads[0]["google_drive_url"] is None
+    spool_dirs = list((tmp_path / "spool").iterdir())
+    assert len(spool_dirs) == 1
+    assert (spool_dirs[0] / "manifest.json").exists()
+
+
+def test_retry_of_spooled_record_stays_failed_instead_of_reporting_stored(tmp_path: Path) -> None:
+    drive = FakeDrive(fail=True)
+    client, settings, airtable, _ = make_client(tmp_path, drive)
+
+    first = post_item(client, settings, {"item_id": "drive-retry", "text": "x"})
+    second = post_item(client, settings, {"item_id": "drive-retry", "text": "x"})
+
+    assert first.status_code == second.status_code == 502
+    assert second.json()["status"] == "drive_upload_failed"
+    assert len(airtable.records) == 1
+    assert len(drive.calls) == 1
+
+
+def test_drive_and_spool_failure_does_not_create_misleading_airtable_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drive = FakeDrive(fail=True)
+    client, settings, airtable, _ = make_client(tmp_path, drive)
+
+    def fail_spool(**kwargs: Any) -> Path:
+        raise OSError("disk unavailable api_key=private-key-value")
+
+    monkeypatch.setattr("app.mobile_api.spool_drive_item", fail_spool)
+
+    response = post_item(client, settings, {"item_id": "drive-and-spool-fail", "text": "retry me"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["status"] == "drive_spool_failed"
+    assert "private-key-value" not in response.text
+    assert airtable.records == {}
+
+
+def test_drive_initialization_failure_is_sanitized_and_non_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = make_settings(tmp_path)
+
+    def fail_build(settings: Settings):
+        raise RuntimeError("refresh_token=secret-refresh-token")
+
+    monkeypatch.setattr("app.drive_storage.build_drive_storage", fail_build)
+
+    state = build_drive_storage_fail_safe(settings)
+
+    assert state.available is False
+    assert state.storage is None
+    assert "secret-refresh-token" not in str(state.error)
+    assert "refresh_token=[redacted]" in str(state.error)
+
+
 def test_successful_telegram_voice_metadata(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     airtable = FakeAirtable()
@@ -349,6 +456,33 @@ def test_successful_telegram_voice_metadata(tmp_path: Path) -> None:
     assert airtable.created_payloads[0]["external_id"] == "telegram:1:2"
     assert airtable.created_payloads[0]["google_drive_url"] == "https://drive.google.com/drive/folders/folder-telegram:1:2"
     assert airtable.created_payloads[0]["source"] == "Telegram"
+
+
+def test_telegram_drive_unavailable_spools_original_and_sets_error(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    content = IncomingContent(
+        raw_text="caption",
+        message_type="Voice",
+        item_id="telegram:drive:unavailable",
+        files=[DriveUploadFile("voice.ogg", "audio/ogg", b"ogg")],
+    )
+
+    stored_content = asyncio.run(
+        store_telegram_originals(
+            settings,
+            None,
+            content,
+            "Drive unavailable refresh_token=secret-refresh-token",
+        )
+    )
+
+    assert stored_content.google_drive_url is None
+    assert stored_content.processing_error
+    assert "secret-refresh-token" not in stored_content.processing_error
+    spool_dirs = list((tmp_path / "spool").iterdir())
+    assert len(spool_dirs) == 1
+    assert (spool_dirs[0] / "manifest.json").exists()
+    assert (spool_dirs[0] / "voice.ogg").read_bytes() == b"ogg"
 
 
 def test_safe_errors_do_not_expose_token_values(tmp_path: Path) -> None:

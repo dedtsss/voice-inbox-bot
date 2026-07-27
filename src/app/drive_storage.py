@@ -23,10 +23,16 @@ SECRET_PATTERNS = (
     re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/\-]+=*", re.IGNORECASE),
     re.compile(r"((?:access|refresh|client)_token['\"]?\s*[:=]\s*)['\"]?[^,'\"\s]+", re.IGNORECASE),
     re.compile(r"(client_secret['\"]?\s*[:=]\s*)['\"]?[^,'\"\s]+", re.IGNORECASE),
+    re.compile(r"((?:api[_-]?key|authorization)['\"]?\s*[:=]\s*)['\"]?[^,'\"\s]+", re.IGNORECASE),
+    re.compile(r"((?:sk-|pat|gh[opsur]_))[A-Za-z0-9_-]+", re.IGNORECASE),
 )
 
 
 class DriveStorageError(RuntimeError):
+    pass
+
+
+class DriveSpoolError(DriveStorageError):
     pass
 
 
@@ -80,6 +86,16 @@ class DriveStorage(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class DriveStorageState:
+    storage: DriveStorage | None
+    error: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.storage is not None and not self.error
+
+
 def new_item_id() -> str:
     return str(uuid.uuid4())
 
@@ -92,6 +108,21 @@ def build_drive_storage(settings: Settings) -> DriveStorage | None:
     if not settings.google_drive_enabled:
         return None
     return GoogleDriveStorage(settings)
+
+
+def build_drive_storage_fail_safe(settings: Settings) -> DriveStorageState:
+    if not settings.google_drive_enabled:
+        return DriveStorageState(storage=None, error="Google Drive storage is disabled")
+    try:
+        storage = build_drive_storage(settings)
+    except Exception as exc:
+        return DriveStorageState(
+            storage=None,
+            error=f"Google Drive storage initialization failed: {safe_error(exc)}",
+        )
+    if storage is None:
+        return DriveStorageState(storage=None, error="Google Drive storage is unavailable")
+    return DriveStorageState(storage=storage)
 
 
 def build_google_drive_service(settings: Settings):
