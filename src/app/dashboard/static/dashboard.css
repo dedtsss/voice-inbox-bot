@@ -790,6 +790,18 @@ select {
   background: rgba(34, 211, 238, 0.12);
 }
 
+.status-subscription {
+  color: #ddd6fe;
+  border-color: rgba(167, 139, 250, 0.42);
+  background: rgba(139, 92, 246, 0.13);
+}
+
+.status-disabled {
+  color: #cbd5e1;
+  border-color: rgba(148, 163, 184, 0.36);
+  background: rgba(100, 116, 139, 0.14);
+}
+
 .status-review {
   color: #fecdd3;
   border-color: rgba(251, 113, 133, 0.45);

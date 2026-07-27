@@ -55,8 +55,12 @@ def create_mobile_api(
     resolved_drive_storage = drive_storage if drive_storage is not None else build_drive_storage(settings)
 
     @app.get("/health")
-    async def health() -> dict[str, bool]:
-        return {"ok": True}
+    async def health() -> dict[str, str | bool]:
+        return {
+            "ok": True,
+            "voice_processing_route": settings.effective_voice_processing_route,
+            "openai_api_processor_enabled": settings.openai_api_processor_enabled,
+        }
 
     @app.post("/api/mobile-inbox/items", response_model=None)
     async def create_mobile_inbox_item(
@@ -79,6 +83,7 @@ def create_mobile_api(
         notes = _build_notes(payload, mobile_files, settings)
         item_id = _extract_item_id(payload)
         created_at = utc_now()
+        processing_mode = settings.voice_processing_mode
 
         existing = await asyncio.to_thread(airtable.find_voice_record_by_external_id, item_id)
         if existing:
@@ -134,7 +139,8 @@ def create_mobile_api(
                 google_drive_url=drive_url,
                 source="Android",
                 processing_error=drive_error,
-                processing_status="Needs Review" if drive_error else "New",
+                processing_status="Needs Review" if drive_error else processing_mode.intake_status,
+                processing_route=processing_mode.airtable_value,
             )
         except AirtableError as exc:
             logger.exception("Could not create mobile inbox Airtable record")

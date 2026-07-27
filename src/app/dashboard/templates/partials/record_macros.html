@@ -1,11 +1,11 @@
 {% import "partials/icons.html" as icons %}
 
 {% macro status_key(status) -%}
-  {%- if status == "New" -%}new{%- elif status == "Processing" -%}processing{%- elif status == "Needs Review" -%}review{%- elif status == "Processed" -%}processed{%- else -%}unknown{%- endif -%}
+  {%- if status == "New" -%}new{%- elif status == "Processing" -%}processing{%- elif status == "Awaiting Subscription" -%}subscription{%- elif status == "Processing Disabled" -%}disabled{%- elif status == "Needs Review" -%}review{%- elif status == "Processed" -%}processed{%- else -%}unknown{%- endif -%}
 {%- endmacro %}
 
-{% macro status_pill(status) -%}
-  <span class="status-pill status-{{ status_key(status)|trim }}">{{ status or "Без статуса" }}</span>
+{% macro status_pill(status, label="") -%}
+  <span class="status-pill status-{{ status_key(status)|trim }}">{{ label or status or "Без статуса" }}</span>
 {%- endmacro %}
 
 {% macro source_icon(source) -%}
@@ -26,7 +26,7 @@
         <a class="record-title" href="/records/{{ record.id }}">{{ record.title }}</a>
         <span class="record-id">{{ record.id }}</span>
       </div>
-      {{ status_pill(record.status) }}
+      {{ status_pill(record.status, record.status_display) }}
     </div>
     <p class="record-summary">{{ record.summary or record.clean_text or record.raw_text or "Нет текста" }}</p>
     <dl class="meta-grid compact-meta">
@@ -57,7 +57,7 @@
   <a class="kanban-card age-{{ record.age_state }}" href="/records/{{ record.id }}">
     <div class="kanban-card-top">
       <span class="record-type-icon small">{{ source_icon(record.source) }}</span>
-      {{ status_pill(record.status) }}
+      {{ status_pill(record.status, record.status_display) }}
     </div>
     <strong>{{ record.title }}</strong>
     <span class="kanban-summary">{{ record.summary or record.clean_text or record.raw_text or "Нет текста" }}</span>
@@ -80,6 +80,6 @@
       <strong>{{ record.title }}</strong>
       <small>{{ record.source or "—" }} · {{ record.created_local }}</small>
     </span>
-    {{ status_pill(record.status) }}
+    {{ status_pill(record.status, record.status_display) }}
   </a>
 {%- endmacro %}

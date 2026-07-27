@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -6,19 +7,63 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def parse_utc_timestamp(value: str) -> datetime:
+VOICE_PROCESSING_ROUTE_CHATGPT_SUBSCRIPTION = "chatgpt_subscription"
+VOICE_PROCESSING_ROUTE_OPENAI_API = "openai_api"
+VOICE_PROCESSING_ROUTE_DISABLED = "disabled"
+VOICE_PROCESSING_ROUTES = {
+    VOICE_PROCESSING_ROUTE_CHATGPT_SUBSCRIPTION,
+    VOICE_PROCESSING_ROUTE_OPENAI_API,
+    VOICE_PROCESSING_ROUTE_DISABLED,
+}
+
+
+@dataclass(frozen=True)
+class VoiceProcessingMode:
+    route: str
+    airtable_value: str
+    intake_status: str
+    russian_name: str
+    description: str
+
+
+VOICE_PROCESSING_MODES = {
+    VOICE_PROCESSING_ROUTE_CHATGPT_SUBSCRIPTION: VoiceProcessingMode(
+        route=VOICE_PROCESSING_ROUTE_CHATGPT_SUBSCRIPTION,
+        airtable_value="ChatGPT Subscription",
+        intake_status="Awaiting Subscription",
+        russian_name="Подписка ChatGPT",
+        description="Backend сохраняет запись и оригиналы в очередь Airtable/Google Drive без вызовов OpenAI API.",
+    ),
+    VOICE_PROCESSING_ROUTE_OPENAI_API: VoiceProcessingMode(
+        route=VOICE_PROCESSING_ROUTE_OPENAI_API,
+        airtable_value="OpenAI API",
+        intake_status="New",
+        russian_name="OpenAI API",
+        description="Разрешены автоматические транскрибация, vision, структурирование и polling через OpenAI API.",
+    ),
+    VOICE_PROCESSING_ROUTE_DISABLED: VoiceProcessingMode(
+        route=VOICE_PROCESSING_ROUTE_DISABLED,
+        airtable_value="Disabled",
+        intake_status="Processing Disabled",
+        russian_name="Обработка отключена",
+        description="Записи и оригиналы сохраняются, AI-обработка не запускается.",
+    ),
+}
+
+
+def parse_utc_timestamp(value: str, *, setting_name: str = "VOICE_PROCESSOR_CREATED_AFTER") -> datetime:
     text = value.strip()
     normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
         raise ValueError(
-            "VOICE_PROCESSOR_CREATED_AFTER must be an ISO 8601 UTC timestamp, "
+            f"{setting_name} must be an ISO 8601 UTC timestamp, "
             "for example 2026-07-19T02:00:00Z"
         ) from exc
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ValueError(
-            "VOICE_PROCESSOR_CREATED_AFTER must include UTC timezone, "
+            f"{setting_name} must include UTC timezone, "
             "for example 2026-07-19T02:00:00Z"
         )
     return parsed.astimezone(timezone.utc)
@@ -35,7 +80,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(alias="TELEGRAM_BOT_TOKEN")
     allowed_telegram_user_ids: str = Field(default="", alias="ALLOWED_TELEGRAM_USER_IDS")
 
-    openai_api_key: str = Field(alias="OPENAI_API_KEY")
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_transcribe_model: str = Field(default="gpt-4o-mini-transcribe", alias="OPENAI_TRANSCRIBE_MODEL")
     openai_structuring_model: str = Field(default="gpt-4o-mini", alias="OPENAI_STRUCTURING_MODEL")
 
@@ -60,6 +105,11 @@ class Settings(BaseSettings):
     voice_field_processing_status_query_name: str = Field(
         default="Статус обработки",
         alias="VOICE_FIELD_PROCESSING_STATUS_QUERY_NAME",
+    )
+    voice_field_processing_route: str = Field(default="Processing Route", alias="VOICE_FIELD_PROCESSING_ROUTE")
+    voice_field_processing_route_query_name: str = Field(
+        default="Processing Route",
+        alias="VOICE_FIELD_PROCESSING_ROUTE_QUERY_NAME",
     )
     voice_field_attachments: str = Field(default="Attachments", alias="VOICE_FIELD_ATTACHMENTS")
     voice_field_notes: str = Field(default="Notes", alias="VOICE_FIELD_NOTES")
@@ -96,6 +146,14 @@ class Settings(BaseSettings):
     voice_field_training_answers_json: str = Field(
         default="Training Answers JSON",
         alias="VOICE_FIELD_TRAINING_ANSWERS_JSON",
+    )
+    voice_field_subscription_claim: str = Field(
+        default="Subscription Queue Claim",
+        alias="VOICE_FIELD_SUBSCRIPTION_CLAIM",
+    )
+    voice_field_subscription_claimed_at: str = Field(
+        default="Subscription Queue Claimed At",
+        alias="VOICE_FIELD_SUBSCRIPTION_CLAIMED_AT",
     )
     voice_training_created_after: str = Field(
         default="2026-07-24T00:00:00Z",
@@ -170,6 +228,7 @@ class Settings(BaseSettings):
     )
     airtable_auto_ensure_fields: bool = Field(default=False, alias="AIRTABLE_AUTO_ENSURE_FIELDS")
 
+    voice_processing_route: str = Field(default="", alias="VOICE_PROCESSING_ROUTE")
     voice_processor_enabled: bool = Field(default=False, alias="VOICE_PROCESSOR_ENABLED")
     voice_processor_interval_seconds: int = Field(default=60, alias="VOICE_PROCESSOR_INTERVAL_SECONDS")
     voice_processor_batch_size: int = Field(default=5, alias="VOICE_PROCESSOR_BATCH_SIZE")
@@ -217,6 +276,11 @@ class Settings(BaseSettings):
     def normalize_voice_processor_source_filter(cls, value: str) -> str:
         return str(value or "").strip()
 
+    @field_validator("voice_processing_route")
+    @classmethod
+    def normalize_voice_processing_route(cls, value: str) -> str:
+        return str(value or "").strip().casefold()
+
     @field_validator("voice_processor_created_after")
     @classmethod
     def validate_voice_processor_created_after(cls, value: str) -> str:
@@ -230,7 +294,7 @@ class Settings(BaseSettings):
     def validate_voice_training_created_after(cls, value: str) -> str:
         text = str(value or "").strip()
         if text:
-            parse_utc_timestamp(text)
+            parse_utc_timestamp(text, setting_name="VOICE_TRAINING_CREATED_AFTER")
         return text
 
     @property
@@ -273,7 +337,7 @@ class Settings(BaseSettings):
     def voice_training_created_after_datetime(self) -> datetime | None:
         if not self.voice_training_created_after:
             return None
-        return parse_utc_timestamp(self.voice_training_created_after)
+        return parse_utc_timestamp(self.voice_training_created_after, setting_name="VOICE_TRAINING_CREATED_AFTER")
 
     @property
     def voice_training_life_area_options(self) -> list[str]:
@@ -282,6 +346,38 @@ class Settings(BaseSettings):
             for part in self.voice_training_life_areas.replace(";", ",").split(",")
             if part.strip()
         ]
+
+    @property
+    def effective_voice_processing_route(self) -> str:
+        if self.voice_processing_route in VOICE_PROCESSING_ROUTES:
+            return self.voice_processing_route
+        return VOICE_PROCESSING_ROUTE_DISABLED
+
+    @property
+    def voice_processing_mode(self) -> VoiceProcessingMode:
+        return VOICE_PROCESSING_MODES[self.effective_voice_processing_route]
+
+    @property
+    def openai_api_processor_enabled(self) -> bool:
+        return self.effective_voice_processing_route == VOICE_PROCESSING_ROUTE_OPENAI_API
+
+    @property
+    def voice_processing_route_warning(self) -> str:
+        if not self.voice_processing_route:
+            return "VOICE_PROCESSING_ROUTE is missing; using safe route disabled"
+        if self.voice_processing_route not in VOICE_PROCESSING_ROUTES:
+            return "VOICE_PROCESSING_ROUTE has an unknown value; using safe route disabled"
+        return ""
+
+
+def validate_openai_api_configuration(settings: Settings) -> None:
+    if not settings.openai_api_processor_enabled:
+        return
+    key = settings.openai_api_key.strip()
+    if not key:
+        raise RuntimeError("VOICE_PROCESSING_ROUTE=openai_api requires OPENAI_API_KEY")
+    if not key.startswith("sk-") or len(key) < 20 or "REPLACE_ME" in key.upper():
+        raise RuntimeError("VOICE_PROCESSING_ROUTE=openai_api requires a valid OPENAI_API_KEY")
 
 
 @lru_cache(maxsize=1)

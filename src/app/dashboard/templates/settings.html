@@ -11,6 +11,21 @@
   </section>
 
   <section class="dashboard-grid">
+    <article class="panel span-12">
+      <div class="panel-head">
+        <div>
+          <h2>Маршрут обработки</h2>
+          <p class="muted">{{ data.processing_mode.description }}</p>
+        </div>
+      </div>
+      <dl class="field-list dense">
+        <div><dt>Активный route</dt><dd>{{ data.processing_mode.route }}</dd></div>
+        <div><dt>Режим</dt><dd>{{ data.processing_mode.russian_name }}</dd></div>
+        <div><dt>OpenAI API processor</dt><dd>{{ "Запущен" if data.processing_mode.openai_processor_running else "Не запущен" }}</dd></div>
+        <div><dt>Ожидают ChatGPT</dt><dd>{{ data.processing_mode.awaiting_subscription }}</dd></div>
+      </dl>
+    </article>
+
     <article class="panel span-6">
       <div class="panel-head"><h2>Runtime</h2></div>
       <dl class="field-list dense">

@@ -17,7 +17,12 @@ from fastapi import FastAPI
 import uvicorn
 
 from app.airtable import AirtableClient, AirtableError, ProjectMatch
-from app.config import Settings, get_settings
+from app.config import (
+    VOICE_PROCESSING_ROUTE_OPENAI_API,
+    Settings,
+    get_settings,
+    validate_openai_api_configuration,
+)
 from app.drive_storage import (
     DriveStorage,
     DriveStorageError,
@@ -29,7 +34,7 @@ from app.drive_storage import (
 )
 from app.mobile_api import create_mobile_api
 from app.openai_ops import OpenAIProcessor
-from app.voice_processor import make_processor
+from app.voice_processor import is_insufficient_quota, make_processor
 
 logger = logging.getLogger(__name__)
 
@@ -144,9 +149,26 @@ async def extract_content(
     message: Message,
     bot: Bot,
     settings: Settings,
-    openai_processor: OpenAIProcessor,
+    openai_processor: OpenAIProcessor | None,
 ) -> IncomingContent:
     if message.voice:
+        if openai_processor is None:
+            source_file = await download_telegram_original(
+                bot=bot,
+                settings=settings,
+                file_id=message.voice.file_id,
+                filename=f"telegram_{message.message_id}.ogg",
+                mime_type="audio/ogg",
+                suffix=".ogg",
+                message=message,
+            )
+            return IncomingContent(
+                raw_text=message.caption or "",
+                message_type="Voice",
+                item_id=telegram_item_id(message),
+                files=[source_file.upload],
+                temp_paths=[source_file.path],
+            )
         transcript, source_file, converted = await transcribe_telegram_file(
             bot=bot,
             settings=settings,
@@ -165,6 +187,23 @@ async def extract_content(
 
     if message.audio:
         file_name = message.audio.file_name or "audio.mp3"
+        if openai_processor is None:
+            source_file = await download_telegram_original(
+                bot=bot,
+                settings=settings,
+                file_id=message.audio.file_id,
+                filename=file_name,
+                mime_type=message.audio.mime_type or "audio/mpeg",
+                suffix=Path(file_name).suffix or ".mp3",
+                message=message,
+            )
+            return IncomingContent(
+                raw_text=message.caption or "",
+                message_type="Audio",
+                item_id=telegram_item_id(message),
+                files=[source_file.upload],
+                temp_paths=[source_file.path],
+            )
         transcript, source_file, converted = await transcribe_telegram_file(
             bot=bot,
             settings=settings,
@@ -185,6 +224,23 @@ async def extract_content(
         file_name = message.document.file_name or "document"
         mime_type = message.document.mime_type or ""
         if mime_type.startswith("audio/"):
+            if openai_processor is None:
+                source_file = await download_telegram_original(
+                    bot=bot,
+                    settings=settings,
+                    file_id=message.document.file_id,
+                    filename=file_name,
+                    mime_type=mime_type,
+                    suffix=Path(file_name).suffix or ".bin",
+                    message=message,
+                )
+                return IncomingContent(
+                    raw_text=message.caption or "",
+                    message_type="Audio file",
+                    item_id=telegram_item_id(message),
+                    files=[source_file.upload],
+                    temp_paths=[source_file.path],
+                )
             transcript, source_file, converted = await transcribe_telegram_file(
                 bot=bot,
                 settings=settings,
@@ -307,6 +363,7 @@ def save_to_airtable(
         google_drive_url=content.google_drive_url,
         source="Telegram",
         processing_error=content.processing_error,
+        processing_route=settings.voice_processing_mode.airtable_value,
     )
 
     item_record = None
@@ -318,6 +375,31 @@ def save_to_airtable(
             project=project,
         )
     return voice_record, item_record, project
+
+
+def save_unprocessed_to_airtable(
+    airtable: AirtableClient,
+    settings: Settings,
+    content: IncomingContent,
+) -> dict:
+    existing = airtable.find_voice_record_by_external_id(content.item_id)
+    if existing:
+        return existing
+    mode = settings.voice_processing_mode
+    raw_title = " ".join(content.raw_text.strip().split())
+    title = raw_title[:90] if raw_title else f"Telegram: {content.message_type} {local_timestamp(settings)}"
+    return airtable.create_mobile_inbox_record(
+        title=title,
+        raw_text=content.raw_text,
+        message_type=content.message_type,
+        notes="Source: Telegram Bot",
+        external_id=content.item_id,
+        google_drive_url=content.google_drive_url,
+        source="Telegram",
+        processing_error=content.processing_error,
+        processing_status="Needs Review" if content.processing_error else mode.intake_status,
+        processing_route=mode.airtable_value,
+    )
 
 
 async def store_telegram_originals(
@@ -390,6 +472,17 @@ def format_reply(structured: dict, voice_record: dict, item_record: dict | None,
     return "\n".join(lines)
 
 
+def format_unprocessed_reply(settings: Settings, voice_record: dict) -> str:
+    mode = settings.voice_processing_mode
+    if mode.route == "chatgpt_subscription":
+        state = "Ожидает обработки ChatGPT."
+    elif mode.route == "disabled":
+        state = "AI-обработка отключена."
+    else:
+        state = "Сохранено для обработки через OpenAI API."
+    return f"Сохранено во входящие.\n{state}\nЗапись Voice Inbox: {voice_record.get('id', 'создана')}"
+
+
 def local_timestamp(settings: Settings) -> str:
     try:
         tzinfo = ZoneInfo(settings.timezone)
@@ -400,7 +493,10 @@ def local_timestamp(settings: Settings) -> str:
 
 async def build_dispatcher(settings: Settings, bot: Bot) -> Dispatcher:
     router = Router()
-    openai_processor = OpenAIProcessor(settings)
+    openai_processor: OpenAIProcessor | None = None
+    if settings.effective_voice_processing_route == VOICE_PROCESSING_ROUTE_OPENAI_API:
+        validate_openai_api_configuration(settings)
+        openai_processor = OpenAIProcessor(settings)
     airtable = AirtableClient(settings)
     drive_storage = build_drive_storage(settings)
 
@@ -426,25 +522,33 @@ async def build_dispatcher(settings: Settings, bot: Bot) -> Dispatcher:
         content: IncomingContent | None = None
         try:
             content = await extract_content(message, bot, settings, openai_processor)
-            if not content.raw_text.strip():
+            if not content.raw_text.strip() and not content.files:
                 await status.edit_text("Не нашёл текст для сохранения.")
                 return
             content = await store_telegram_originals(settings, drive_storage, content)
-            structured = await openai_processor.structure_text(content.raw_text, content.message_type)
-            voice_record, item_record, project = await asyncio.to_thread(
-                save_to_airtable,
-                airtable,
-                settings,
-                structured,
-                content,
-            )
-            await status.edit_text(format_reply(structured, voice_record, item_record, project))
+            if openai_processor is not None:
+                structured = await openai_processor.structure_text(content.raw_text, content.message_type)
+                voice_record, item_record, project = await asyncio.to_thread(
+                    save_to_airtable,
+                    airtable,
+                    settings,
+                    structured,
+                    content,
+                )
+                await status.edit_text(format_reply(structured, voice_record, item_record, project))
+            else:
+                voice_record = await asyncio.to_thread(save_unprocessed_to_airtable, airtable, settings, content)
+                await status.edit_text(format_unprocessed_reply(settings, voice_record))
         except AirtableError:
             logger.exception("Airtable write failed")
             await status.edit_text("Не удалось записать в Airtable. Проверь логи бота.")
-        except Exception:
-            logger.exception("Message processing failed")
-            await status.edit_text("Не удалось обработать сообщение. Проверь логи бота.")
+        except Exception as exc:
+            if is_insufficient_quota(exc):
+                logger.warning("Telegram OpenAI API processing stopped: balance unavailable")
+                await status.edit_text("Недоступен баланс OpenAI API")
+            else:
+                logger.exception("Message processing failed")
+                await status.edit_text("Не удалось обработать сообщение. Проверь логи бота.")
         finally:
             if content:
                 cleanup_temp_paths(settings, content.temp_paths)
@@ -486,6 +590,18 @@ async def stop_task(task: asyncio.Task, timeout: float) -> None:
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = get_settings()
+    if settings.voice_processing_route_warning:
+        logger.warning(settings.voice_processing_route_warning)
+    if settings.voice_processor_enabled:
+        logger.warning(
+            "VOICE_PROCESSOR_ENABLED is deprecated and ignored; VOICE_PROCESSING_ROUTE controls OpenAI API usage"
+        )
+    logger.info(
+        "Voice processing route active route=%s openai_processor=%s",
+        settings.effective_voice_processing_route,
+        str(settings.openai_api_processor_enabled).lower(),
+    )
+    validate_openai_api_configuration(settings)
     if not settings.allowed_user_ids:
         raise RuntimeError("ALLOWED_TELEGRAM_USER_IDS must contain at least one Telegram user id")
 
@@ -507,7 +623,7 @@ async def main() -> None:
     shutdown_task = asyncio.create_task(stop_event.wait(), name="shutdown-signal")
     processor_task = (
         asyncio.create_task(make_processor(settings).run_loop(stop_event), name="voice-processor")
-        if settings.voice_processor_enabled
+        if settings.openai_api_processor_enabled
         else None
     )
     running_tasks = {telegram_task, http_task, shutdown_task}

@@ -26,6 +26,16 @@ TRAINING_TYPE_CHOICES = [
     "Событие",
     "Другое",
 ]
+PROCESSING_ROUTE_CHOICES = ["ChatGPT Subscription", "OpenAI API", "Disabled"]
+PROCESSING_STATUS_CHOICES = [
+    "New",
+    "Processing",
+    "Processed",
+    "Needs Review",
+    "Awaiting Subscription",
+    "Processing Disabled",
+]
+SUBSCRIPTION_TECHNICAL_PATTERNS = ("smoke", "canary", "production test", "tg-smoke", "dashboard-canary")
 
 
 class AirtableError(RuntimeError):
@@ -256,6 +266,8 @@ class AirtableClient:
         google_drive_url: str | None = None,
         source: str | None = None,
         processing_error: str | None = None,
+        processing_route: str | None = None,
+        processing_status: str = "Processed",
     ) -> dict:
         fields = self._voice_fields(
             structured,
@@ -267,6 +279,8 @@ class AirtableClient:
             google_drive_url=google_drive_url,
             source=source,
             processing_error=processing_error,
+            processing_route=processing_route,
+            processing_status=processing_status,
         )
         try:
             return self.create_record(
@@ -290,9 +304,18 @@ class AirtableClient:
                 google_drive_url=None,
                 source=None,
                 processing_error=None,
+                processing_route=None,
+                processing_status=processing_status,
             )
             if optional_payload_error:
-                self._set_voice_metadata(minimal, external_id, google_drive_url, source, processing_error)
+                self._set_voice_metadata(
+                    minimal,
+                    external_id,
+                    google_drive_url,
+                    source,
+                    processing_error,
+                    processing_route,
+                )
             return self.create_record(
                 self.settings.voice_inbox_base_id,
                 self.settings.voice_inbox_table_id,
@@ -312,6 +335,7 @@ class AirtableClient:
         source: str | None = None,
         processing_error: str | None = None,
         processing_status: str = "New",
+        processing_route: str | None = None,
     ) -> dict:
         fields: dict = {}
         self._set(fields, self.settings.voice_field_title, title)
@@ -319,7 +343,7 @@ class AirtableClient:
         self._set(fields, self.settings.voice_field_type, message_type)
         self._set(fields, self.settings.voice_field_processing_status, processing_status)
         self._set(fields, self.settings.voice_field_notes, notes)
-        self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
+        self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error, processing_route)
         try:
             return self.create_record(
                 self.settings.voice_inbox_base_id,
@@ -405,10 +429,11 @@ class AirtableClient:
         source: str | None = None,
         processing_error: str | None = None,
         processing_status: str | None = None,
+        processing_route: str | None = None,
     ) -> dict:
         fields: dict = {}
         self._set(fields, self.settings.voice_field_processing_status, processing_status)
-        self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
+        self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error, processing_route)
         try:
             return self.update_record(
                 self.settings.voice_inbox_base_id,
@@ -439,7 +464,11 @@ class AirtableClient:
     ) -> list[dict]:
         limit = max(1, batch_size)
         status_field = self.settings.voice_field_processing_status_query_name or self.settings.voice_field_processing_status
-        formula_parts = [f"{{{status_field}}} = 'New'"]
+        route_field = self.settings.voice_field_processing_route_query_name or self.settings.voice_field_processing_route
+        formula_parts = [
+            f"{{{status_field}}} = 'New'",
+            f"{{{route_field}}} = 'OpenAI API'",
+        ]
         normalized_source = source_filter.strip()
         if normalized_source:
             source_field = self.settings.voice_field_source_query_name or self.settings.voice_field_source
@@ -461,6 +490,110 @@ class AirtableClient:
                 ("filterByFormula", formula),
                 ("sort[0][field]", status_field),
                 ("sort[0][direction]", "asc"),
+            ],
+            max_records=limit,
+        )
+
+    def list_subscription_queue_records(
+        self,
+        *,
+        batch_size: int,
+        created_after: datetime | None = None,
+    ) -> list[dict]:
+        limit = max(1, min(batch_size, 100))
+        table = self.find_table_metadata(
+            self.settings.voice_inbox_base_id,
+            table_id=self.settings.voice_inbox_table_id,
+        )
+        status_field = _metadata_field_name(
+            table,
+            self.settings.voice_field_processing_status_query_name or self.settings.voice_field_processing_status,
+            "Статус обработки",
+        )
+        route_field = _metadata_field_name(
+            table,
+            self.settings.voice_field_processing_route_query_name or self.settings.voice_field_processing_route,
+            "Processing Route",
+        )
+        drive_field = _metadata_field_name(table, self.settings.voice_field_google_drive, "Google Drive")
+        claim_field = _metadata_field_name(
+            table,
+            self.settings.voice_field_subscription_claim,
+            "Subscription Queue Claim",
+        )
+        formula_parts = [
+            f"{{{route_field}}} = 'ChatGPT Subscription'",
+            f"{{{status_field}}} = 'Awaiting Subscription'",
+            f"NOT({{{drive_field}}} = '')",
+            f"{{{claim_field}}} = ''",
+        ]
+        technical_fields = [
+            _metadata_field_name(table, self.settings.voice_field_title, "Название"),
+            _metadata_field_name(table, self.settings.voice_field_raw_text, "Исходная фраза"),
+            _metadata_field_name(table, self.settings.voice_field_clean_text, "Очищенный текст"),
+            _metadata_field_name(
+                table,
+                self.settings.voice_field_external_id_query_name or self.settings.voice_field_external_id,
+                "External ID",
+            ),
+            _metadata_field_name(table, self.settings.voice_field_notes, "Notes"),
+        ]
+        technical_checks = [
+            f"SEARCH('{_escape_airtable_formula_string(pattern)}', LOWER({{{field_name}}} & ''))"
+            for pattern in SUBSCRIPTION_TECHNICAL_PATTERNS
+            for field_name in technical_fields
+            if field_name
+        ]
+        if technical_checks:
+            formula_parts.append(f"NOT(OR({','.join(technical_checks)}))")
+        if created_after is not None:
+            formula_parts.append(
+                "IS_AFTER(CREATED_TIME(), "
+                f"DATETIME_PARSE('{_format_airtable_datetime(created_after)}'))"
+            )
+        return self.list_records(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            params=[
+                ("pageSize", str(limit)),
+                ("maxRecords", str(limit)),
+                ("filterByFormula", f"AND({','.join(formula_parts)})"),
+            ],
+            max_records=limit,
+        )
+
+    def claim_subscription_queue_record(self, record_id: str, *, claim: str, claimed_at: datetime) -> dict:
+        return self.update_voice_record_fields(
+            record_id,
+            {
+                self.settings.voice_field_subscription_claim: claim,
+                self.settings.voice_field_subscription_claimed_at: _format_airtable_datetime(claimed_at),
+            },
+        )
+
+    def list_insufficient_quota_review_records(self, *, max_records: int = 1000) -> list[dict]:
+        limit = max(1, max_records)
+        table = self.find_table_metadata(
+            self.settings.voice_inbox_base_id,
+            table_id=self.settings.voice_inbox_table_id,
+        )
+        status_field = _metadata_field_name(
+            table,
+            self.settings.voice_field_processing_status_query_name or self.settings.voice_field_processing_status,
+            "Статус обработки",
+        )
+        error_field = _metadata_field_name(table, self.settings.voice_field_processing_error, "Ошибка обработки")
+        formula = (
+            f"AND({{{status_field}}} = 'Needs Review',"
+            f"SEARCH('insufficient_quota', LOWER({{{error_field}}} & '')))"
+        )
+        return self.list_records(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            params=[
+                ("pageSize", str(min(limit, 100))),
+                ("maxRecords", str(limit)),
+                ("filterByFormula", formula),
             ],
             max_records=limit,
         )
@@ -628,19 +761,34 @@ class AirtableClient:
                 checkbox_field(self.settings.voice_field_train_on_correction),
                 {"name": self.settings.voice_field_correction_comment, "type": "multilineText"},
                 checkbox_field(self.settings.voice_field_training_applied),
+                select_field(self.settings.voice_field_processing_route, PROCESSING_ROUTE_CHOICES),
+                {"name": self.settings.voice_field_subscription_claim, "type": "singleLineText"},
+                date_time_field(self.settings.voice_field_subscription_claimed_at),
             ],
         )
         added_status_choices = self.ensure_select_field_choices(
             self.settings.voice_inbox_base_id,
             self.settings.voice_inbox_table_id,
             self.settings.voice_field_processing_status,
-            ["Processing"],
+            PROCESSING_STATUS_CHOICES,
             allow_typecast_record_fallback=True,
+        )
+        added_route_choices = (
+            []
+            if self.settings.voice_field_processing_route in created_fields
+            else self.ensure_select_field_choices(
+                self.settings.voice_inbox_base_id,
+                self.settings.voice_inbox_table_id,
+                self.settings.voice_field_processing_route,
+                PROCESSING_ROUTE_CHOICES,
+                allow_typecast_record_fallback=True,
+            )
         )
         table_id, created_table = self._ensure_processing_rules_table()
         return {
             "created_fields": created_fields,
             "added_status_choices": added_status_choices,
+            "added_route_choices": added_route_choices,
             "rules_table_id": table_id,
             "created_rules_table": created_table,
         }
@@ -913,13 +1061,15 @@ class AirtableClient:
         google_drive_url: str | None = None,
         source: str | None = None,
         processing_error: str | None = None,
+        processing_route: str | None = None,
+        processing_status: str = "Processed",
     ) -> dict:
         fields: dict = {}
         self._set(fields, self.settings.voice_field_title, structured.get("title") or _first_line(raw_text))
         self._set(fields, self.settings.voice_field_summary, structured.get("summary"))
         self._set(fields, self.settings.voice_field_clean_text, structured.get("clean_text") or raw_text)
         self._set(fields, self.settings.voice_field_raw_text, raw_text)
-        self._set(fields, self.settings.voice_field_processing_status, "Processed")
+        self._set(fields, self.settings.voice_field_processing_status, processing_status)
         if include_optional:
             self._set(fields, self.settings.voice_field_type, structured.get("type") or message_type)
             self._set(fields, self.settings.voice_field_priority, structured.get("priority"))
@@ -929,7 +1079,14 @@ class AirtableClient:
                 self._set(fields, self.settings.voice_field_tags, tags[:10])
             if project:
                 self._set(fields, self.settings.voice_field_project, project.title)
-            self._set_voice_metadata(fields, external_id, google_drive_url, source, processing_error)
+            self._set_voice_metadata(
+                fields,
+                external_id,
+                google_drive_url,
+                source,
+                processing_error,
+                processing_route,
+            )
         return fields
 
     @staticmethod
@@ -947,11 +1104,13 @@ class AirtableClient:
         google_drive_url: str | None,
         source: str | None,
         processing_error: str | None,
+        processing_route: str | None = None,
     ) -> None:
         self._set(fields, self.settings.voice_field_external_id, external_id)
         self._set(fields, self.settings.voice_field_google_drive, google_drive_url)
         self._set(fields, self.settings.voice_field_source, source)
         self._set(fields, self.settings.voice_field_processing_error, processing_error)
+        self._set(fields, self.settings.voice_field_processing_route, processing_route)
 
     def _drop_voice_metadata(self, fields: dict[str, Any]) -> None:
         for field in (
@@ -959,6 +1118,7 @@ class AirtableClient:
             self.settings.voice_field_google_drive,
             self.settings.voice_field_source,
             self.settings.voice_field_processing_error,
+            self.settings.voice_field_processing_route,
         ):
             fields.pop(field, None)
 
@@ -1010,6 +1170,11 @@ def find_field_metadata(table: dict[str, Any], configured_field: str) -> dict[st
         if configured_field in {field.get("id"), field.get("name")}:
             return field
     return None
+
+
+def _metadata_field_name(table: dict[str, Any] | None, configured_field: str, fallback: str) -> str:
+    field = find_field_metadata(table or {}, configured_field) or find_field_metadata(table or {}, fallback)
+    return str((field or {}).get("name") or fallback)
 
 
 def checkbox_field(name: str) -> dict[str, Any]:

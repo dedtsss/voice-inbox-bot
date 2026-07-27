@@ -22,9 +22,19 @@
       <small>В текущей выборке</small>
     </a>
     <a class="metric" href="/records?status=New">
-      <span class="metric-label">New</span>
+      <span class="metric-label">OpenAI API</span>
       <strong>{{ overview.cards["New"] }}</strong>
-      <small>Ожидают processor</small>
+      <small>Ожидают автоматическую обработку</small>
+    </a>
+    <a class="metric accent-blue" href="/records?status=Awaiting%20Subscription">
+      <span class="metric-label">Ожидают ChatGPT</span>
+      <strong>{{ overview.cards["Awaiting Subscription"] }}</strong>
+      <small>Очередь подписки</small>
+    </a>
+    <a class="metric" href="/records?status=Processing%20Disabled">
+      <span class="metric-label">Обработка отключена</span>
+      <strong>{{ overview.cards["Processing Disabled"] }}</strong>
+      <small>Оригиналы сохранены</small>
     </a>
     <a class="metric accent-cyan" href="/records?status=Processing">
       <span class="metric-label">Processing</span>

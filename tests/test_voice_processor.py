@@ -32,6 +32,7 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         TELEGRAM_BOT_TOKEN="123:test",
         ALLOWED_TELEGRAM_USER_IDS="1",
         OPENAI_API_KEY="sk-test",
+        VOICE_PROCESSING_ROUTE="openai_api",
         AIRTABLE_TOKEN="pat-test",
         VOICE_INBOX_BASE_ID="appYRukVuHediikiR",
         VOICE_INBOX_TABLE_ID="tblRMsY9zB5tnVfTR",
@@ -233,6 +234,11 @@ class MetadataCreateSession:
         self.post_payloads: list[dict[str, Any]] = []
 
     def get(self, url: str, timeout: int = 30) -> FakeAirtableResponse:
+        created_fields = [
+            {"id": f"fldCreated{index}", **payload}
+            for index, payload in enumerate(self.post_payloads, start=1)
+            if payload.get("name") and payload.get("type") and not payload.get("fields")
+        ]
         return FakeAirtableResponse(
             {
                 "tables": [
@@ -244,9 +250,18 @@ class MetadataCreateSession:
                                 "id": "fldzeZ9TidyPb1NMa",
                                 "name": "Статус обработки",
                                 "type": "singleSelect",
-                                "options": {"choices": [{"id": "selProcessing", "name": "Processing"}]},
+                                "options": {
+                                    "choices": [
+                                        {"name": "New"},
+                                        {"name": "Processing"},
+                                        {"name": "Processed"},
+                                        {"name": "Needs Review"},
+                                        {"name": "Awaiting Subscription"},
+                                        {"name": "Processing Disabled"},
+                                    ]
+                                },
                             }
-                        ],
+                        ] + created_fields,
                     }
                 ]
             }
@@ -520,6 +535,7 @@ def make_record(record_id: str = "rec1", **fields: Any) -> dict[str, Any]:
         "Название": "Raw",
         "Тип": "Task",
         "Статус обработки": "New",
+        "Processing Route": "OpenAI API",
         "Исходная фраза": "Проверить счет и оплатить.",
         "Google Drive": "https://drive.google.com/drive/folders/folder1",
         "Источник": "Android",
@@ -746,8 +762,9 @@ def test_airtable_processing_candidates_include_source_and_cutoff_filters(tmp_pa
     formula = [value for key, value in session.requests[0] if key == "filterByFormula"][0]
     assert "{Статус обработки} = 'New'" in formula
     assert "{Источник} = 'Android'" in formula
+    assert "{Processing Route} = 'OpenAI API'" in formula
     assert "IS_AFTER(CREATED_TIME(), DATETIME_PARSE('2026-07-19T10:00:00.000Z'))" in formula
-    assert "Processing" not in formula
+    assert "{Статус обработки} = 'Processing'" not in formula
 
 
 def test_airtable_correction_candidates_use_max_records_and_stop_pagination(tmp_path: Path) -> None:
@@ -822,6 +839,12 @@ def test_ensure_voice_processor_schema_creates_checkbox_fields_with_options(tmp_
         "Обучить на исправлении": {"icon": "check", "color": "greenBright"},
         "Обучение учтено": {"icon": "check", "color": "greenBright"},
     }
+    route_payload = next(payload for payload in session.post_payloads if payload.get("name") == "Processing Route")
+    assert [choice["name"] for choice in route_payload["options"]["choices"]] == [
+        "ChatGPT Subscription",
+        "OpenAI API",
+        "Disabled",
+    ]
     rules_table_payload = next(payload for payload in session.post_payloads if payload.get("name") == "Правила обработки")
     active_field = next(field for field in rules_table_payload["fields"] if field["name"] == "Активно")
     assert active_field["options"] == {"icon": "check", "color": "greenBright"}
@@ -1162,6 +1185,22 @@ def test_processing_error_is_bounded_retry(tmp_path: Path) -> None:
     assert stats.retried == 1
     assert fields["Статус обработки"] == "New"
     assert "attempt=1" in fields["Ошибка обработки"]
+
+
+def test_insufficient_quota_stops_without_needs_review_or_retry(tmp_path: Path) -> None:
+    airtable = FakeAirtable([make_record()])
+    ai = FakeAI([RuntimeError("OpenAI error code=insufficient_quota private diagnostic")])
+    processor = make_processor(tmp_path, airtable, ai, FakeDriveReader())
+
+    stats = asyncio_run(processor.run_once())
+
+    fields = airtable.records["rec1"]["fields"]
+    assert stats.failed == 1
+    assert stats.retried == 0
+    assert len(ai.structure_calls) == 1
+    assert fields["Статус обработки"] == "Processing Disabled"
+    assert fields["Processing Route"] == "OpenAI API"
+    assert "Недоступен баланс OpenAI API" in fields["Ошибка обработки"]
 
 
 def test_run_once_skips_processing_record(tmp_path: Path) -> None:
