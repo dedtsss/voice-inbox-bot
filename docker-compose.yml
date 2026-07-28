@@ -25,3 +25,13 @@ services:
       DASHBOARD_PUBLIC_ORIGIN: ${DASHBOARD_PUBLIC_ORIGIN:-http://127.0.0.1:8081}
     ports:
       - "127.0.0.1:${DASHBOARD_PUBLISHED_PORT:-8081}:8081"
+
+  voice-inbox-drive-spool-recovery:
+    build: .
+    command: ["python", "-m", "app.drive_spool_recovery", "--apply", "--batch-size", "5"]
+    profiles: ["recovery"]
+    restart: "no"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data

@@ -403,6 +403,33 @@ Google Drive является обязательным хранилищем ор
 
 Ошибка инициализации Drive не останавливает Telegram polling и Android API. Техническое сообщение очищается от token/key values перед записью в Airtable, HTTP-ответом или логированием. Локальный spool — аварийная копия, а не замена Drive; его нужно перенести в Drive и обновить запись отдельной recovery-задачей.
 
+### Drive spool recovery
+
+Recovery проверяет локальный `manifest.json`, размер и SHA-256 каждого оригинала, находит существующую Airtable-запись по `External ID` и работает только с маршрутом `ChatGPT Subscription`, статусом `Needs Review`, пустым Drive URL и технической ошибкой Drive. После загрузки он повторно скачивает manifest и оригиналы из Drive, проверяет их, атомарно обновляет ту же Airtable-запись, повторно читает её и только затем удаляет локальный spool.
+
+Dry-run ничего не загружает, не меняет Airtable, не создаёт lock и не удаляет spool:
+
+```bash
+PYTHONPATH=src python -m app.drive_spool_recovery --dry-run --batch-size 5
+PYTHONPATH=src python -m app.drive_spool_recovery --dry-run --item-id ITEM_ID
+```
+
+Ограниченный apply:
+
+```bash
+PYTHONPATH=src python -m app.drive_spool_recovery --apply --batch-size 1
+```
+
+Папка Drive получает стабильный хешированный `appProperties` identity от `item_id`; оригиналы и manifest получают собственные стабильные ключи и SHA-256. Поэтому повтор после падения между Drive upload и Airtable update находит те же объекты и не создаёт дубликаты. Для каждого spool-элемента apply создаёт атомарную lock-директорию; lock старше `--lock-timeout-seconds` считается зависшим и безопасно заменяется. Итоговый JSON содержит только `scanned`, `eligible`, `recovered`, `skipped`, `corrupted`, `failed` и `already_recovered` без record/file IDs, URL, имён или manifest content.
+
+Для Docker Compose есть однократный recovery service:
+
+```bash
+docker compose run --rm --no-deps voice-inbox-drive-spool-recovery
+```
+
+Production timer устанавливается из `deploy/systemd/voice-inbox-drive-spool-recovery.service` и `.timer`. Он запускает пачку из пяти элементов примерно раз в пять минут. systemd не запускает второй экземпляр того же oneshot unit параллельно, а item locks защищают от одновременного ручного запуска. При выключенном или ненастроенном Google Drive CLI безопасно завершается без сканирования и изменений.
+
 Когда `GOOGLE_DRIVE_ENABLED=true`, для каждого входящего Android или Telegram элемента создаётся папка:
 
 ```text

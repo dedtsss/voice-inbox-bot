@@ -1,0 +1,14 @@
+[Unit]
+Description=Voice Inbox Google Drive spool recovery
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/voice-inbox-bot
+ExecStart=/usr/bin/docker compose run --rm --no-deps voice-inbox-drive-spool-recovery
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target

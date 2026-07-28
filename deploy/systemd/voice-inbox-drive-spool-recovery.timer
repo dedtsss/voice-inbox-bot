@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Voice Inbox Google Drive spool recovery every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=voice-inbox-drive-spool-recovery.service
+
+[Install]
+WantedBy=timers.target
