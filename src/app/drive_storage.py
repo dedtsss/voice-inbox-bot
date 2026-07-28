@@ -173,14 +173,25 @@ def save_refreshed_google_drive_token(token_file: Path, creds: Any) -> None:
         if not isinstance(payload, dict):
             raise ValueError("OAuth payload is not an object")
         token_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        token_owner: tuple[int, int] | None = None
         if token_file.exists():
+            token_stat = token_file.stat()
+            token_owner = (token_stat.st_uid, token_stat.st_gid)
             previous = token_file.read_text(encoding="utf-8")
-            _atomic_private_write(token_file.with_name(f"{token_file.name}.bak"), previous)
-        _atomic_private_write(token_file, serialized)
+            _atomic_private_write(
+                token_file.with_name(f"{token_file.name}.bak"),
+                previous,
+                ownership=token_owner,
+            )
+        _atomic_private_write(token_file, serialized, ownership=token_owner)
         persisted = json.loads(token_file.read_text(encoding="utf-8"))
         for key in ("token", "refresh_token", "client_id"):
             if payload.get(key) != persisted.get(key):
                 raise OSError(f"persisted OAuth field mismatch: {key}")
+        if token_owner is not None:
+            persisted_stat = token_file.stat()
+            if (persisted_stat.st_uid, persisted_stat.st_gid) != token_owner:
+                raise OSError("persisted OAuth token ownership changed")
         if token_file.stat().st_mode & 0o077:
             raise OSError("persisted OAuth token permissions are too broad")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -221,10 +232,20 @@ def verify_google_drive_token_persistence(settings: Settings) -> None:
         raise DriveStorageError("Google Drive OAuth token persistence is unavailable") from exc
 
 
-def _atomic_private_write(path: Path, content: str) -> None:
+def _atomic_private_write(
+    path: Path,
+    content: str,
+    *,
+    ownership: tuple[int, int] | None = None,
+) -> None:
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temp_name)
     try:
+        if ownership is None and path.exists():
+            existing = path.stat()
+            ownership = (existing.st_uid, existing.st_gid)
+        if ownership is not None:
+            os.fchown(fd, *ownership)
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             fd = -1
