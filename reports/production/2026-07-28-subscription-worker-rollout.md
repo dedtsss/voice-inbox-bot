@@ -3,7 +3,7 @@
 ## Result
 
 - Runtime rollout: successful.
-- Runtime rollout commit: `9a4320db09ce0f81f1de861780d5bf0368d0b2a8`.
+- Runtime rollout commit: `77e23291cb1b5b13c9c1f1eb327238d3c559aa6d`.
 - Production checkout was updated only by fast-forward; tracked files are clean and all five pre-existing untracked runtime files were preserved.
 - Private pre-change backup: `/var/backups/voice-inbox-bot/20260728T131713Z-pre-subscription-worker` (root-only, mode `0700`; contained a checkout, runtime configuration, OAuth material, and systemd units without logging their content).
 
@@ -49,7 +49,7 @@
 - `docker compose config`: passed.
 - `systemd-analyze verify deploy/systemd/*.service deploy/systemd/*.timer`: passed.
 - Feature PR #19: CI passed; feature commit `54f7bf532ee23ce120ee5fd90639870c9f8bcce3`; merge commit `ef7b8478cc9eb8cf3e4e645f0de6cbe9d413e031`.
-- Rollout corrections PRs #20–#23 each passed CI before merge. They cover an optional absent namespace path, host OAuth path precedence, bubblewrap proc visibility, and protected proc binding. Final runtime merge is `9a4320db09ce0f81f1de861780d5bf0368d0b2a8`.
+- Rollout corrections PRs #20–#23 and OAuth ownership PR #25 each passed CI before merge. They cover an optional absent namespace path, host OAuth path precedence, bubblewrap proc visibility, protected proc binding, and preservation of token ownership across users. Final runtime merge is `77e23291cb1b5b13c9c1f1eb327238d3c559aa6d`.
 
 ## Production checks
 
@@ -74,6 +74,7 @@
 - Exact prior warning cause: the OAuth token was an individual read-only Docker bind mount, so atomic replacement after refresh was impossible even though the containing directory appeared writable.
 - The token now lives in a dedicated private runtime-secret directory (directory `0700`, token `0600`) mounted read-write at the container runtime-secret boundary. The repository and `.env` contain no token.
 - A safe real refresh was performed. Atomic save, fsync, read-back verification, restrictive mode, and `.bak` creation all succeeded.
+- A second real refresh was forced from the root backend container. The token and backup retained the host worker's UID/GID and mode `0600`; a subsequent worker run as `codex` passed OAuth persistence, Drive access, and the empty-queue check.
 - Persistence verification also succeeded inside the rebuilt container; new `oauth_token_persistence_failed` warnings: `0`.
 
 ## Remaining limitations
