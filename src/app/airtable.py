@@ -216,6 +216,13 @@ class AirtableClient:
         records = response.json().get("records") or []
         return records[0] if records else None
 
+    def fetch_voice_record(self, record_id: str) -> dict:
+        return self.fetch_record(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            record_id,
+        )
+
     def list_projects(self) -> list[ProjectMatch]:
         projects: list[ProjectMatch] = []
         offset: str | None = None
