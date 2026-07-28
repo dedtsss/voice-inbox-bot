@@ -39,7 +39,6 @@ ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
 ProtectProc=invisible
-ProcSubset=pid
 LockPersonality=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
