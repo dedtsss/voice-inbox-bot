@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
+
+from app.drive_storage import save_refreshed_google_drive_token
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
@@ -31,9 +32,8 @@ def main() -> None:
         prompt="consent",
         authorization_prompt_message="Open this URL in a browser and approve Drive access:\n{url}\n",
     )
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(creds.to_json())
-    os.chmod(token_path, 0o600)
+    token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    save_refreshed_google_drive_token(token_path, creds)
     print(f"Wrote OAuth token JSON to {token_path}")
 
 

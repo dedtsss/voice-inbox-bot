@@ -109,15 +109,9 @@ class ProcessorOutput(BaseModel):
     period: str | None = None
     next_action: str | None = None
     tags: list[str] = Field(default_factory=list)
-    confidence: float = 0.0
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     needs_review_reasons: list[str] = Field(default_factory=list)
     routing_reason: str = ""
-
-    @field_validator("confidence")
-    @classmethod
-    def clamp_confidence(cls, value: float) -> float:
-        return max(0.0, min(1.0, float(value)))
-
 
 @dataclass(frozen=True)
 class DriveOriginal:
@@ -259,6 +253,16 @@ class GoogleDriveInboxReader:
         if not folder_id:
             return False
         return self._find_child(folder_id, "manifest.json") is not None
+
+    def check_access(self) -> None:
+        self.service.files().list(
+            q="trashed = false",
+            spaces="drive",
+            fields="files(id)",
+            pageSize=1,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
 
     def _find_child(self, folder_id: str, name: str) -> dict[str, Any] | None:
         escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")

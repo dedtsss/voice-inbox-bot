@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Voice Inbox Codex Subscription worker every ten minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=60s
+AccuracySec=1min
+Persistent=true
+Unit=voice-inbox-subscription-worker.service
+
+[Install]
+WantedBy=timers.target
