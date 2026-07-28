@@ -15,10 +15,8 @@ Environment=SUBSCRIPTION_CODEX_AUTH_FILE=/home/codex/.codex/auth.json
 Environment=SUBSCRIPTION_WORKER_LOCK_FILE=/run/voice-inbox-subscription-worker/worker.lock
 Environment=SUBSCRIPTION_WORKER_TMP_ROOT=/var/lib/voice-inbox-subscription-worker/tmp
 Environment=SUBSCRIPTION_STT_CACHE_DIR=/var/cache/voice-inbox-subscription-worker/whisper
-Environment=GOOGLE_DRIVE_CREDENTIALS_FILE=/var/lib/voice-inbox-subscription-worker/secrets/google-drive-client.json
-Environment=GOOGLE_DRIVE_TOKEN_FILE=/var/lib/voice-inbox-subscription-worker/secrets/google-drive-token.json
 WorkingDirectory=/var/lib/voice-inbox-subscription-worker
-ExecStart=/usr/bin/env /var/lib/voice-inbox-subscription-worker/venv/bin/python -m app.subscription_worker --once --batch-size 1 --max-runtime 1800
+ExecStart=/usr/bin/env GOOGLE_DRIVE_CREDENTIALS_FILE=/var/lib/voice-inbox-subscription-worker/secrets/google-drive-client.json GOOGLE_DRIVE_TOKEN_FILE=/var/lib/voice-inbox-subscription-worker/secrets/google-drive-token.json /var/lib/voice-inbox-subscription-worker/venv/bin/python -m app.subscription_worker --once --batch-size 1 --max-runtime 1800
 TimeoutStartSec=35min
 TimeoutStopSec=30s
 KillMode=mixed
