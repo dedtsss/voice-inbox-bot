@@ -271,6 +271,38 @@ class Settings(BaseSettings):
     google_drive_token_file: str = Field(default="", alias="GOOGLE_DRIVE_TOKEN_FILE")
     google_drive_spool_dir: str = Field(default="/app/data/google_drive_spool", alias="GOOGLE_DRIVE_SPOOL_DIR")
 
+    subscription_codex_binary: str = Field(default="codex", alias="SUBSCRIPTION_CODEX_BINARY")
+    subscription_codex_auth_file: str = Field(default="", alias="SUBSCRIPTION_CODEX_AUTH_FILE")
+    subscription_worker_lock_file: str = Field(
+        default="/run/voice-inbox-subscription-worker/worker.lock",
+        alias="SUBSCRIPTION_WORKER_LOCK_FILE",
+    )
+    subscription_worker_tmp_root: str = Field(
+        default="/tmp/voice-inbox-subscription-worker",
+        alias="SUBSCRIPTION_WORKER_TMP_ROOT",
+    )
+    subscription_worker_instance: str = Field(default="default", alias="SUBSCRIPTION_WORKER_INSTANCE")
+    subscription_claim_timeout_seconds: int = Field(
+        default=3600,
+        alias="SUBSCRIPTION_CLAIM_TIMEOUT_SECONDS",
+    )
+    subscription_codex_timeout_seconds: int = Field(default=600, alias="SUBSCRIPTION_CODEX_TIMEOUT_SECONDS")
+    subscription_stt_timeout_seconds: int = Field(default=600, alias="SUBSCRIPTION_STT_TIMEOUT_SECONDS")
+    subscription_media_timeout_seconds: int = Field(default=120, alias="SUBSCRIPTION_MEDIA_TIMEOUT_SECONDS")
+    subscription_max_pdf_pages: int = Field(default=12, alias="SUBSCRIPTION_MAX_PDF_PAGES")
+    subscription_max_video_frames: int = Field(default=6, alias="SUBSCRIPTION_MAX_VIDEO_FRAMES")
+    subscription_max_images: int = Field(default=12, alias="SUBSCRIPTION_MAX_IMAGES")
+    subscription_max_prompt_chars: int = Field(default=24_000, alias="SUBSCRIPTION_MAX_PROMPT_CHARS")
+    subscription_max_response_bytes: int = Field(default=65_536, alias="SUBSCRIPTION_MAX_RESPONSE_BYTES")
+    subscription_stt_model: str = Field(default="small", alias="SUBSCRIPTION_STT_MODEL")
+    subscription_stt_device: str = Field(default="cpu", alias="SUBSCRIPTION_STT_DEVICE")
+    subscription_stt_compute_type: str = Field(default="int8", alias="SUBSCRIPTION_STT_COMPUTE_TYPE")
+    subscription_stt_language: str = Field(default="ru", alias="SUBSCRIPTION_STT_LANGUAGE")
+    subscription_stt_cache_dir: str = Field(
+        default="/var/cache/voice-inbox-subscription-worker/whisper",
+        alias="SUBSCRIPTION_STT_CACHE_DIR",
+    )
+
     @field_validator("voice_processor_source_filter")
     @classmethod
     def normalize_voice_processor_source_filter(cls, value: str) -> str:

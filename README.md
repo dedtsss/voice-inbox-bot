@@ -588,6 +588,40 @@ PYTHONPATH=src python -m app.subscription_queue --batch-size 5 --created-after 2
 
 Для ручного worker используйте `claim_item()` по одной записи, затем `load_bundle()` и только после повторной проверки claim — `finalize_processed()` или `finalize_needs_review()`. При временной инфраструктурной ошибке вызывайте `release_claim()` с безопасным техническим кодом. Финализация выполняет один Airtable PATCH, очищает claim и claimed timestamp, повторно читает запись и допускает идемпотентный повтор после потери ответа Airtable. Исходная фраза, Google Drive URL и External ID этим API не записываются и сверяются с исходным snapshot.
 
+### Automatic Codex Subscription worker
+
+`app.subscription_worker` использует официальный non-interactive `codex exec` и сохранённый ChatGPT login из Codex CLI. Это advanced ChatGPT-managed auth: `OPENAI_API_KEY` не передаётся и API billing не используется. Перед включением timer выполните `codex login status`; auth должен быть `Logged in using ChatGPT`. `auth.json` хранится вне репозитория с mode `0600` и никогда не добавляется в `.env`.
+
+Один bounded запуск:
+
+```bash
+PYTHONPATH=src python -m app.subscription_worker --dry-run --once --batch-size 1
+PYTHONPATH=src python -m app.subscription_worker --once --batch-size 1 --max-runtime 1800
+```
+
+Дополнительные режимы: `--record-id`, `--no-finalize` и последовательный `--batch-size`. Worker держит process lock, claims только одну запись за раз и не выбирает следующую до финализации либо безопасного release. Stale recovery затрагивает только claims с собственным `subscription-worker-v1:<instance>:` prefix, статусом `Awaiting Subscription` и возрастом больше `SUBSCRIPTION_CLAIM_TIMEOUT_SECONDS`; получение локального lock подтверждает отсутствие предыдущего локального процесса.
+
+Codex запускается не из production checkout. Для каждого model-run создаётся mode `0700` temp root; outer `bubblewrap` скрывает `/opt`, `/home`, `/root`, `/run` и `/var`, оставляя `/work`, минимальные CA/DNS system files и auth-only `CODEX_HOME`. Внутри Codex используются `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--sandbox read-only`, `--ask-for-approval never`, `--output-schema`; shell, apps/MCP, browser, computer use, image generation, web search и multi-agent tools отключены. Environment строится allowlist и не содержит production `.env`, Airtable/Telegram/Google credentials или переменных с API keys.
+
+Media остаётся локальным: `faster-whisper small` на CPU/int8 для audio, нормализованный повтор при неоднозначности, `pdftotext` + bounded `pdftoppm`/Tesseract для PDF scans и `ffmpeg` для video audio плюс ограниченных representative frames. Локальные изображения передаются официальным `codex exec --image` только из очищенного temp `/work`. File/record, PDF page, video frame, prompt, response и process time limits задаются env из `.env.example`.
+
+Установка host runtime и timer:
+
+```bash
+sudo apt-get install -y bubblewrap ffmpeg poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus
+python3 -m venv /var/lib/voice-inbox-subscription-worker/venv
+/var/lib/voice-inbox-subscription-worker/venv/bin/pip install -r /opt/voice-inbox-bot/requirements-subscription.txt
+sudo -u codex /var/lib/voice-inbox-subscription-worker/venv/bin/hf download \
+  Systran/faster-whisper-small \
+  --cache-dir /var/cache/voice-inbox-subscription-worker/whisper
+sudo install -m 0644 deploy/systemd/voice-inbox-subscription-worker.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/voice-inbox-subscription-worker.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now voice-inbox-subscription-worker.timer
+```
+
+Systemd unit запускается как `codex`, каждые 10 минут с randomized delay до 60 секунд, `batch-size=1`, max runtime 30 минут и hardening. Google OAuth client/token для host worker должны находиться в `/var/lib/voice-inbox-subscription-worker/secrets`; token directory обязан быть writable для atomic refresh persistence. Не монтируйте один token file read-only: refresh будет работать только в памяти и последующий запуск потеряет обновлённый credential.
+
 Quota migration:
 
 ```bash

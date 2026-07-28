@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
 import logging
 import os
 import re
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -163,11 +165,85 @@ def build_google_drive_service(settings: Settings):
 
 
 def save_refreshed_google_drive_token(token_file: Path, creds: Any) -> None:
+    """Persist refreshed OAuth credentials atomically and verify the on-disk result."""
+
     try:
-        token_file.write_text(creds.to_json())
-        os.chmod(token_file, 0o600)
-    except OSError:
-        logger.warning("Could not persist refreshed Google Drive OAuth token")
+        serialized = creds.to_json()
+        payload = json.loads(serialized)
+        if not isinstance(payload, dict):
+            raise ValueError("OAuth payload is not an object")
+        token_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if token_file.exists():
+            previous = token_file.read_text(encoding="utf-8")
+            _atomic_private_write(token_file.with_name(f"{token_file.name}.bak"), previous)
+        _atomic_private_write(token_file, serialized)
+        persisted = json.loads(token_file.read_text(encoding="utf-8"))
+        for key in ("token", "refresh_token", "client_id"):
+            if payload.get(key) != persisted.get(key):
+                raise OSError(f"persisted OAuth field mismatch: {key}")
+        if token_file.stat().st_mode & 0o077:
+            raise OSError("persisted OAuth token permissions are too broad")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Google Drive OAuth token persistence failed code=oauth_token_persistence_failed")
+        raise DriveStorageError("Google Drive OAuth token persistence failed") from exc
+
+
+def verify_google_drive_token_persistence(settings: Settings) -> None:
+    """Verify an OAuth token can be atomically replaced without exposing its content."""
+
+    credentials_file = Path(settings.google_drive_credentials_file)
+    if not credentials_file.exists():
+        raise DriveStorageError("Google Drive credentials file is missing")
+    try:
+        credentials_payload = json.loads(credentials_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DriveStorageError("Google Drive credentials file is invalid") from exc
+    if credentials_payload.get("type") == "service_account":
+        return
+
+    token_file = Path(settings.google_drive_token_file) if settings.google_drive_token_file else None
+    if token_file is None or not token_file.is_file():
+        raise DriveStorageError("Google Drive OAuth token file is missing")
+    try:
+        payload = json.loads(token_file.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not payload.get("refresh_token"):
+            raise ValueError("OAuth refresh token is missing")
+        token_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, probe_name = tempfile.mkstemp(prefix=".oauth-persistence-probe-", dir=token_file.parent)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, b"{}")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+            Path(probe_name).unlink(missing_ok=True)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise DriveStorageError("Google Drive OAuth token persistence is unavailable") from exc
+
+
+def _atomic_private_write(path: Path, content: str) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            fd = -1
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 class GoogleDriveStorage:

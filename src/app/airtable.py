@@ -578,6 +578,43 @@ class AirtableClient:
             },
         )
 
+    def list_claimed_subscription_queue_records(self, *, max_records: int = 100) -> list[dict]:
+        limit = max(1, min(max_records, 100))
+        table = self.find_table_metadata(
+            self.settings.voice_inbox_base_id,
+            table_id=self.settings.voice_inbox_table_id,
+        )
+        status_field = _metadata_field_name(
+            table,
+            self.settings.voice_field_processing_status_query_name or self.settings.voice_field_processing_status,
+            "Статус обработки",
+        )
+        route_field = _metadata_field_name(
+            table,
+            self.settings.voice_field_processing_route_query_name or self.settings.voice_field_processing_route,
+            "Processing Route",
+        )
+        claim_field = _metadata_field_name(
+            table,
+            self.settings.voice_field_subscription_claim,
+            "Subscription Queue Claim",
+        )
+        formula = (
+            f"AND({{{route_field}}} = 'ChatGPT Subscription',"
+            f"{{{status_field}}} = 'Awaiting Subscription',"
+            f"NOT({{{claim_field}}} = ''))"
+        )
+        return self.list_records(
+            self.settings.voice_inbox_base_id,
+            self.settings.voice_inbox_table_id,
+            params=[
+                ("pageSize", str(limit)),
+                ("maxRecords", str(limit)),
+                ("filterByFormula", formula),
+            ],
+            max_records=limit,
+        )
+
     def list_insufficient_quota_review_records(self, *, max_records: int = 1000) -> list[dict]:
         limit = max(1, max_records)
         table = self.find_table_metadata(
