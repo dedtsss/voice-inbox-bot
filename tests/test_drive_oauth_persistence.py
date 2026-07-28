@@ -44,6 +44,7 @@ def oauth_settings(tmp_path: Path):
 
 def test_oauth_token_refresh_is_atomic_private_and_backed_up(tmp_path: Path) -> None:
     settings, token = oauth_settings(tmp_path)
+    original_owner = (token.stat().st_uid, token.stat().st_gid)
     refreshed = {
         "token": "new-access",
         "refresh_token": "refresh-private",
@@ -54,6 +55,9 @@ def test_oauth_token_refresh_is_atomic_private_and_backed_up(tmp_path: Path) -> 
     assert json.loads(token.read_text(encoding="utf-8"))["token"] == "new-access"
     assert json.loads((token.parent / "token.json.bak").read_text(encoding="utf-8"))["token"] == "old-access"
     assert token.stat().st_mode & 0o077 == 0
+    assert (token.stat().st_uid, token.stat().st_gid) == original_owner
+    backup = token.parent / "token.json.bak"
+    assert (backup.stat().st_uid, backup.stat().st_gid) == original_owner
     verify_google_drive_token_persistence(settings)
     assert not list(token.parent.glob(".oauth-persistence-probe-*"))
 
