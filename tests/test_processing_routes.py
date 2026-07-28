@@ -269,7 +269,13 @@ class FakeQueueAirtable:
 
     def claim_subscription_queue_record(self, record_id: str, *, claim: str, claimed_at: datetime) -> dict[str, Any]:
         self.claims.append(record_id)
-        return {"id": record_id}
+        record = self.fetch_voice_record(record_id)
+        record["fields"]["Subscription Queue Claim"] = claim
+        record["fields"]["Subscription Queue Claimed At"] = claimed_at.isoformat()
+        return record
+
+    def fetch_voice_record(self, record_id: str) -> dict[str, Any]:
+        return next(record for record in self.records if record["id"] == record_id)
 
 
 class FakeQueueDrive:

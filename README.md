@@ -586,6 +586,8 @@ PYTHONPATH=src python -m app.subscription_queue --batch-size 5 --created-after 2
 
 Внутренний `SubscriptionQueue.load_bundle()` возвращает Airtable record ID, External ID, источник, тип, дату, исходный текст (если есть), Drive folder URL, разобранный `manifest.json` и проверенные оригинальные файлы. Публичный API для очереди не создаётся.
 
+Для ручного worker используйте `claim_item()` по одной записи, затем `load_bundle()` и только после повторной проверки claim — `finalize_processed()` или `finalize_needs_review()`. При временной инфраструктурной ошибке вызывайте `release_claim()` с безопасным техническим кодом. Финализация выполняет один Airtable PATCH, очищает claim и claimed timestamp, повторно читает запись и допускает идемпотентный повтор после потери ответа Airtable. Исходная фраза, Google Drive URL и External ID этим API не записываются и сверяются с исходным snapshot.
+
 Quota migration:
 
 ```bash
