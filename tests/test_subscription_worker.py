@@ -387,6 +387,21 @@ def test_codex_environment_is_allowlisted_without_dotenv_or_secrets(tmp_path: Pa
     assert not any("TOKEN" in key or "SECRET" in key or "PASSWORD" in key for key in environment)
 
 
+def test_codex_sandbox_reuses_outer_read_only_proc(tmp_path: Path) -> None:
+    runner = object.__new__(CodexSubscriptionRunner)
+    runner.bwrap = "/usr/bin/bwrap"
+    runner.binary = Path("/usr/bin/codex")
+    command = runner._sandbox_command(
+        tmp_path / "work",
+        tmp_path / "auth",
+        tmp_path / "result.json",
+        tmp_path / "schema.json",
+        [],
+    )
+    assert "--proc" not in command
+    assert any(command[index : index + 3] == ["--ro-bind", "/proc", "/proc"] for index in range(len(command)))
+
+
 def test_logs_do_not_contain_user_data_or_secrets(worker_settings: Any, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO)
     queue = FakeQueue([queue_item()])
