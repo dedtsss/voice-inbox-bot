@@ -185,12 +185,9 @@
           </label>
 
           <label>
-            <span>5. Что нужно сделать?</span>
-            <select name="next_action" required>
-              {% for action in session.options.next_actions %}
-                <option value="{{ action }}" {% if session.ai_proposal.next_action == action %}selected{% endif %}>{{ action }}</option>
-              {% endfor %}
-            </select>
+            <span>5. Следующий конкретный шаг</span>
+            <textarea name="next_action" rows="3" maxlength="500" placeholder="Например: Проверить документацию">{{ session.ai_proposal.next_action }}</textarea>
+            <small class="field-help">Необязательно. Заполняйте, только если из записи следует действие.</small>
             {% if errors and errors.next_action %}<span class="field-error">{{ errors.next_action }}</span>{% endif %}
           </label>
 

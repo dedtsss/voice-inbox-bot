@@ -83,10 +83,10 @@
         <a class="icon-link" href="/sources">{{ icons.icon("arrow") }}<span>Все</span></a>
       </div>
       <div class="distribution-list">
-        {% for source, count in overview.source_counts %}
-          <a href="/records?source={{ source }}" class="distribution-row">
-            <span>{{ source }}</span>
-            <strong>{{ count }}</strong>
+        {% for source in overview.source_counts %}
+          <a href="/records?source={{ source.value }}" class="distribution-row">
+            <span>{{ source.label }}</span>
+            <strong>{{ source.count }}</strong>
           </a>
         {% else %}
           <p class="empty">Источник пока не определен.</p>

@@ -22,7 +22,7 @@
       <select name="source">
         <option value="">Все</option>
         {% for option in data.options.sources %}
-          <option value="{{ option }}" {% if data.filters.source == option %}selected{% endif %}>{{ option }}</option>
+          <option value="{{ option.value }}" {% if data.filters.source == option.value %}selected{% endif %}>{{ option.label }}</option>
         {% endfor %}
       </select>
     </label>
@@ -83,7 +83,7 @@
     <div class="filter-chips" aria-label="Активные фильтры">
       {% if data.filters.q %}<span>Поиск: {{ data.filters.q }}</span>{% endif %}
       {% if data.filters.status %}<span>{{ data.filters.status }}</span>{% endif %}
-      {% if data.filters.source %}<span>{{ data.filters.source }}</span>{% endif %}
+      {% if data.filters.source %}<span>{{ "Источник не указан" if data.filters.source == "__empty__" else data.filters.source }}</span>{% endif %}
       {% if data.filters.project %}<span>{{ data.filters.project }}</span>{% endif %}
       {% if data.filters.entry_type %}<span>{{ data.filters.entry_type }}</span>{% endif %}
       {% if data.filters.period %}<span>{{ data.filters.period }}</span>{% endif %}

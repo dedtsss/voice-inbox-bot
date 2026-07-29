@@ -22,6 +22,7 @@ from app.voice_processor import (
     allowed_context_from_metadata,
     build_airtable_update_fields,
     classify_media,
+    normalize_select,
     parse_airtable_created_time,
     validate_processor_output,
 )
@@ -668,6 +669,25 @@ def test_project_field_uses_voice_inbox_single_select_metadata(tmp_path: Path) -
     assert [project.title for project in allowed.projects] == ["Home", "Work"]
     assert fields["fldmOj3oOUEJGsQcx"] == "Home"
     assert fields["fldmOj3oOUEJGsQcx"] != ["recHome"]
+
+
+def test_processor_type_context_casefolds_duplicate_airtable_choices(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    table = {
+        "fields": [
+            {"id": "fldType", "name": "Тип", "options": {"choices": [{"name": "file"}, {"name": "File"}, {"name": "note"}, {"name": "Note"}]}},
+            {"id": "fldProject", "name": "Проект", "options": {"choices": []}},
+            {"id": "fldPriority", "name": "Приоритет", "options": {"choices": [{"name": "Normal"}]}},
+            {"id": "fldStatus", "name": "Статус обработки", "options": {"choices": [{"name": "Processed"}, {"name": "Needs Review"}]}},
+            {"id": "fldTags", "name": "Теги", "options": {"choices": []}},
+        ]
+    }
+
+    allowed = allowed_context_from_metadata(table, settings, [])
+
+    assert allowed.type_options == {"File", "Note"}
+    assert normalize_select(" file ", allowed.type_options) == "File"
+    assert normalize_select("NOTE", allowed.type_options) == "Note"
 
 
 @pytest.mark.parametrize(

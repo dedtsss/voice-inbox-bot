@@ -24,9 +24,13 @@ from app.airtable import (
     find_field_metadata,
 )
 from app.config import Settings
+from app.select_options import canonical_select_options, canonical_select_value, clean_select_value
 from app.voice_processor import allowed_context_from_metadata, get_field, is_insufficient_quota
 
 TECHNICAL_PATTERNS = ("smoke", "canary", "production test", "TG-SMOKE", "dashboard-canary")
+EMPTY_SOURCE_QUERY_VALUE = "__empty__"
+EMPTY_SOURCE_LABEL = "Источник не указан"
+CONTENT_MEDIA_TYPE_KEYS = {"text", "voice", "photo", "video", "file", "mixed", "audio"}
 KANBAN_MOVE_STATUSES = (
     "Awaiting Subscription",
     "Processing",
@@ -46,15 +50,6 @@ TRAINING_ENTRY_TYPE_OPTIONS = (
     "Контакт",
     "Событие",
     "Другое",
-)
-TRAINING_NEXT_ACTION_OPTIONS = (
-    "Выполнить",
-    "Проверить",
-    "Запланировать",
-    "Передать",
-    "Уточнить",
-    "Сохранить для информации",
-    "Без действия",
 )
 TRAINING_FORM_KEYS = {
     "csrf_token",
@@ -118,6 +113,9 @@ class EditableField:
     value: Any
     options: tuple[str, ...] = ()
     max_length: int = 0
+    helper_text: str = ""
+    placeholder: str = ""
+    legacy_option: str = ""
 
 
 @dataclass(frozen=True)
@@ -256,7 +254,7 @@ class DashboardAirtableService:
                 "Processing Disabled",
             }:
                 cards[status] += 1
-            source = item["source"] or "Без источника"
+            source = item["source"].strip()
             source_counts[source] += 1
             if source in cards:
                 cards[source] += 1
@@ -313,7 +311,7 @@ class DashboardAirtableService:
             "cards": cards,
             "technical": technical,
             "status_counts": count_items(status_counts),
-            "source_counts": count_items(source_counts),
+            "source_counts": source_count_items(source_counts),
             "project_counts": count_items(project_counts),
             "type_counts": count_items(type_counts),
             "priority_counts": count_items(priority_counts),
@@ -773,15 +771,16 @@ class DashboardAirtableService:
     def sources_dashboard(self) -> dict[str, Any]:
         overview = self.overview()
         source_cards = []
-        for source, count in overview["source_counts"]:
+        for source in overview["source_counts"]:
             source_cards.append(
                 {
-                    "name": source,
-                    "count": count,
+                    "name": source["label"],
+                    "value": source["value"],
+                    "count": source["count"],
                     "records": [
                         record
                         for record in overview["recent_records"]
-                        if (record.get("source") or "Без источника") == source
+                        if (record.get("source") or "") == ("" if source["value"] == EMPTY_SOURCE_QUERY_VALUE else source["value"])
                     ][:4],
                 }
             )
@@ -981,14 +980,18 @@ def field_value(fields: dict[str, Any], bindings: dict[str, FieldBinding], key: 
     return get_field(fields, *binding.read_names)
 
 
-def filter_options(metadata: dict[str, Any]) -> dict[str, list[str]]:
+def filter_options(metadata: dict[str, Any]) -> dict[str, Any]:
     allowed = metadata["allowed"]
     bindings: dict[str, FieldBinding] = metadata["bindings"]
     return {
         "statuses": sorted(allowed.status_options or set(bindings["status"].options), key=str.casefold),
-        "sources": ["Android", "Telegram"],
+        "sources": [
+            {"value": "Android", "label": "Android"},
+            {"value": "Telegram", "label": "Telegram"},
+            {"value": EMPTY_SOURCE_QUERY_VALUE, "label": EMPTY_SOURCE_LABEL},
+        ],
         "projects": [project.title for project in allowed.projects] or list(bindings["project"].options),
-        "types": sorted(allowed.type_options or set(bindings["entry_type"].options), key=str.casefold),
+        "types": canonical_select_options(allowed.type_options or set(bindings["entry_type"].options)),
         "priorities": sorted(allowed.priority_options or set(bindings["priority"].options), key=str.casefold),
     }
 
@@ -1012,7 +1015,6 @@ def training_form_options(metadata: dict[str, Any], settings: Settings) -> dict[
         "projects": base["projects"],
         "life_areas": training_life_area_options(metadata, settings),
         "entry_types": entry_types,
-        "next_actions": list(TRAINING_NEXT_ACTION_OPTIONS),
         "priorities": base["priorities"],
         "tags": list(bindings["tags"].options),
     }
@@ -1166,8 +1168,6 @@ def training_needs_clarification(item: dict[str, Any]) -> bool:
         return True
     if not item.get("entry_type"):
         return True
-    if not item.get("next_action"):
-        return True
     if item.get("ai_confidence_percent") is not None and item["ai_confidence_percent"] < 80:
         return True
     return False
@@ -1198,7 +1198,7 @@ def ai_proposal_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "scope": infer_scope_from_record(record),
         "project": record.get("project") or "",
         "entry_type": record.get("entry_type") or "",
-        "next_action": record.get("next_action") if record.get("next_action") in TRAINING_NEXT_ACTION_OPTIONS else "",
+        "next_action": record.get("next_action") or "",
         "priority": record.get("priority") or "",
         "due_date": record.get("due_date") or "",
         "tags": ",".join(record.get("tags") or []) if isinstance(record.get("tags"), list) else "",
@@ -1236,9 +1236,7 @@ def validate_training_form(
     entry_type = clean_form_text(form.get("entry_type"), limit=120)
     if entry_type not in options["entry_types"]:
         errors["entry_type"] = "Выберите тип записи"
-    next_action = clean_form_text(form.get("next_action"), limit=120)
-    if next_action not in options["next_actions"]:
-        errors["next_action"] = "Выберите следующее действие"
+    next_action = clean_form_text(form.get("next_action"), limit=500)
     priority = clean_form_text(form.get("priority"), limit=120)
     if priority and options["priorities"] and priority not in options["priorities"]:
         errors["priority"] = "Недопустимый приоритет"
@@ -1446,7 +1444,6 @@ def build_records_formula(query: dict[str, str], bindings: dict[str, FieldBindin
     parts: list[str] = []
     exact_filters = {
         "status": "status",
-        "source": "source",
         "project": "project",
         "entry_type": "entry_type",
     }
@@ -1454,6 +1451,11 @@ def build_records_formula(query: dict[str, str], bindings: dict[str, FieldBindin
         value = str(query.get(query_key) or "").strip()
         if value:
             parts.append(equals_formula(bindings[binding_key], value))
+    source = str(query.get("source") or "").strip()
+    if source == EMPTY_SOURCE_QUERY_VALUE:
+        parts.append(empty_field_formula(bindings["source"]))
+    elif source:
+        parts.append(equals_formula(bindings["source"], source))
     search = str(query.get("q") or "").strip()
     if search:
         searchable = [
@@ -1490,6 +1492,11 @@ def build_records_formula(query: dict[str, str], bindings: dict[str, FieldBindin
 def equals_formula(binding: FieldBinding, value: str) -> str:
     field_name = binding.read_names[-1]
     return f"{{{field_name}}} = '{_escape_airtable_formula_string(value)}'"
+
+
+def empty_field_formula(binding: FieldBinding) -> str:
+    field_name = binding.read_names[-1]
+    return f"OR({{{field_name}}} = '',NOT({{{field_name}}}))"
 
 
 def period_filter_formula(period: str, settings: Settings) -> str:
@@ -1691,15 +1698,38 @@ def is_technical_record(item: dict[str, Any]) -> bool:
 
 def editable_fields(item: dict[str, Any], metadata: dict[str, Any]) -> list[EditableField]:
     options = filter_options(metadata)
+    entry_type = clean_select_value(item.get("entry_type"))
+    canonical_entry_type = canonical_select_value(entry_type, options["types"])
+    legacy_entry_type = (
+        entry_type
+        if entry_type
+        and (
+            entry_type.casefold() in CONTENT_MEDIA_TYPE_KEYS
+            or canonical_entry_type is None
+            or canonical_entry_type != entry_type
+        )
+        else ""
+    )
+    editable_type_options = tuple(
+        option for option in options["types"] if option.casefold() not in CONTENT_MEDIA_TYPE_KEYS
+    )
     return [
         EditableField("project", "Проект", "select", item.get("project") or "", tuple(options["projects"])),
-        EditableField("entry_type", "Тип", "select", item.get("entry_type") or "", tuple(options["types"])),
+        EditableField("entry_type", "Тип", "select", entry_type, editable_type_options, legacy_option=legacy_entry_type),
         EditableField("priority", "Приоритет", "select", item.get("priority") or "", tuple(options["priorities"])),
         EditableField("due_date", "Срок", "date", item.get("due_date") or ""),
         EditableField("amount", "Сумма", "number", item.get("amount") if item.get("amount") is not None else ""),
         EditableField("counterparty", "Контрагент", "text", item.get("counterparty") or "", max_length=300),
         EditableField("period", "Период", "text", item.get("period") or "", max_length=300),
-        EditableField("next_action", "Следующее действие", "textarea", item.get("next_action") or "", max_length=1000),
+        EditableField(
+            "next_action",
+            "Следующий конкретный шаг",
+            "textarea",
+            item.get("next_action") or "",
+            max_length=1000,
+            helper_text="Необязательно. Заполняйте, только если из записи следует действие",
+            placeholder="Например: Проверить документацию",
+        ),
         EditableField("correction_comment", "Комментарий к исправлению", "textarea", item.get("correction_comment") or "", max_length=2000),
     ]
 
@@ -1718,7 +1748,7 @@ def validate_edit_form(
         if key not in EDITABLE_KEYS and key not in {"csrf_token", "action"}:
             errors[key] = "Unknown editable field"
     set_select(fields, errors, bindings["project"], "project", form, allowed["projects"], current)
-    set_select(fields, errors, bindings["entry_type"], "entry_type", form, allowed["types"], current)
+    set_entry_type_select(fields, errors, bindings["entry_type"], form, allowed["types"], current)
     set_select(fields, errors, bindings["priority"], "priority", form, allowed["priorities"], current)
     set_date(fields, errors, bindings["due_date"], "due_date", form, current)
     set_decimal(fields, errors, bindings["amount"], "amount", form, current)
@@ -1745,6 +1775,32 @@ def set_select(
         errors[key] = "Недопустимое значение"
         return
     add_if_changed(fields, binding, value or None, current.get(key))
+
+
+def set_entry_type_select(
+    fields: dict[str, Any],
+    errors: dict[str, str],
+    binding: FieldBinding,
+    form: dict[str, Any],
+    allowed: list[str],
+    current: dict[str, Any],
+) -> None:
+    if "entry_type" not in form:
+        return
+    value = clean_form_text(form.get("entry_type"), limit=120)
+    if not value:
+        add_if_changed(fields, binding, None, current.get("entry_type"))
+        return
+    canonical = canonical_select_value(value, allowed)
+    current_value = clean_select_value(current.get("entry_type"))
+    if canonical is None:
+        if value == current_value:
+            add_if_changed(fields, binding, current_value, current.get("entry_type"))
+            return
+        errors["entry_type"] = "Недопустимое значение"
+        return
+    selected = current_value if value == current_value else canonical
+    add_if_changed(fields, binding, selected, current.get("entry_type"))
 
 
 def set_date(
@@ -1905,6 +1961,19 @@ def view_query(query: dict[str, str]) -> str:
 
 def count_items(counter: Counter[str], *, limit: int = 8) -> list[tuple[str, int]]:
     return sorted(counter.items(), key=lambda item: (-item[1], item[0].casefold()))[:limit]
+
+
+def source_count_items(counter: Counter[str], *, limit: int = 8) -> list[dict[str, Any]]:
+    result = []
+    for source, count in count_items(counter, limit=limit):
+        result.append(
+            {
+                "label": source or EMPTY_SOURCE_LABEL,
+                "value": source or EMPTY_SOURCE_QUERY_VALUE,
+                "count": count,
+            }
+        )
+    return result
 
 
 def truthy_value(value: Any) -> bool:

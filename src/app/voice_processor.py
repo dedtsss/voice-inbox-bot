@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from app.airtable import AirtableClient, AirtableError, ProjectMatch
 from app.config import Settings, get_settings, validate_openai_api_configuration
 from app.drive_storage import DriveStorageError, build_google_drive_service, safe_error
+from app.select_options import canonical_select_options
 
 logger = logging.getLogger(__name__)
 
@@ -839,6 +840,8 @@ def build_structure_system_prompt(allowed: AllowedContext, rules: list[dict]) ->
     return (
         "Ты обрабатываешь личный Voice Inbox в Airtable. Верни только объект по JSON Schema. "
         "Пиши title, clean_text, summary, next_action, tags и reasons по-русски, если запись русская. "
+        "next_action — только конкретный следующий шаг, когда он действительно следует из записи; "
+        "для заметки или справочной информации ставь null и не выдумывай действие. "
         "Не выдумывай проекты или значения select. Если проект, тип или приоритет не очевидны, ставь null "
         "и добавляй причину в needs_review_reasons. Даты нормализуй в YYYY-MM-DD, суммы в number. "
         "Не создавай задачи, только классифицируй запись.\n\n"
@@ -1072,7 +1075,7 @@ def build_airtable_update_fields(settings: Settings, validated: ValidatedResult)
 def allowed_context_from_metadata(table: dict, settings: Settings, projects: list[ProjectMatch]) -> AllowedContext:
     project_options = select_options_for_field(table, settings.voice_field_project)
     return AllowedContext(
-        type_options=select_options_for_field(table, settings.voice_field_type),
+        type_options=set(canonical_select_options(select_options_for_field(table, settings.voice_field_type))),
         priority_options=select_options_for_field(table, settings.voice_field_priority),
         status_options=select_options_for_field(table, settings.voice_field_processing_status),
         tag_options=select_options_for_field(table, settings.voice_field_tags),
@@ -1272,7 +1275,7 @@ def normalize_select(value: Any, allowed: set[str]) -> str | None:
         return None
     if not allowed:
         return text
-    for option in allowed:
+    for option in sorted(allowed, key=lambda item: (item.casefold(), item)):
         if option.casefold() == text.casefold():
             return option
     return None
