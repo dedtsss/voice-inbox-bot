@@ -468,6 +468,77 @@ def test_kanban_page_uses_real_record_data() -> None:
     assert "filterByFormula" in dict(airtable.page_calls[-1]["params"])
 
 
+def test_kanban_zoom_toolbar_and_mobile_viewport_render_without_secrets() -> None:
+    client, _ = make_client()
+
+    response = client.get("/kanban")
+
+    assert response.status_code == 200
+    assert 'data-kanban-root' in response.text
+    assert 'data-min-scale="0.4"' in response.text
+    assert 'data-max-scale="1.2"' in response.text
+    assert 'data-kanban-zoom-out' in response.text
+    assert 'data-kanban-zoom-in' in response.text
+    assert 'data-kanban-zoom-reset' in response.text
+    assert 'data-kanban-zoom-fit' in response.text
+    assert 'data-kanban-viewport' in response.text
+    assert 'data-kanban-drag-handle' in response.text
+    for secret in ("sk-test", "pat-test", "appTest", "dashboard-test-secret-with-more-than-32-bytes"):
+        assert secret not in response.text
+
+
+def test_kanban_move_api_changes_only_processing_status() -> None:
+    record = make_record("recKanbanMove1", **{"Статус обработки": "Needs Review"})
+    client, airtable = make_client(FakeAirtable(records=[record]))
+    token = csrf_from(client.get("/kanban").text)
+
+    response = client.post(
+        "/kanban/records/recKanbanMove1/move",
+        data={"csrf_token": token, "status": "Processed"},
+        headers={"Origin": "http://testserver"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "record_id": "recKanbanMove1",
+        "status": "Processed",
+        "status_display": "Обработано",
+    }
+    assert airtable.updates == [("recKanbanMove1", {"Статус обработки": "Processed"})]
+
+
+def test_kanban_move_api_rejects_invalid_status_and_csrf() -> None:
+    client, airtable = make_client()
+    token = csrf_from(client.get("/kanban").text)
+
+    invalid_status = client.post(
+        "/kanban/records/recDashboard1/move",
+        data={"csrf_token": token, "status": "Delete Everything"},
+        headers={"Origin": "http://testserver"},
+    )
+    invalid_csrf = client.post(
+        "/kanban/records/recDashboard1/move",
+        data={"csrf_token": "bad", "status": "Processed"},
+        headers={"Origin": "http://testserver"},
+    )
+
+    assert invalid_status.status_code == 422
+    assert invalid_csrf.status_code == 403
+    assert airtable.updates == []
+
+
+def test_kanban_javascript_has_device_local_storage_key_without_secrets() -> None:
+    client, _ = make_client()
+
+    response = client.get("/static/dashboard.js")
+
+    assert response.status_code == 200
+    assert "voice-inbox.dashboard.kanban.zoom.v1" in response.text
+    assert "localStorage" in response.text
+    for secret in ("sk-test", "pat-test", "appTest", "dashboard-test-secret-with-more-than-32-bytes"):
+        assert secret not in response.text
+
+
 def test_detail_card_renders_and_does_not_expose_attachment_url() -> None:
     client, _ = make_client()
 

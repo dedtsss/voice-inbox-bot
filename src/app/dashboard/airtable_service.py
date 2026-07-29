@@ -27,6 +27,13 @@ from app.config import Settings
 from app.voice_processor import allowed_context_from_metadata, get_field, is_insufficient_quota
 
 TECHNICAL_PATTERNS = ("smoke", "canary", "production test", "TG-SMOKE", "dashboard-canary")
+KANBAN_MOVE_STATUSES = (
+    "Awaiting Subscription",
+    "Processing",
+    "Processing Disabled",
+    "Needs Review",
+    "Processed",
+)
 TRAINING_STATUSES = ("Pending", "In Progress", "Completed", "Skipped", "Auto Confirmed")
 TRAINING_SCOPE_OPTIONS = ("Личное", "Рабочее", "Смешанное", "Не уверен")
 TRAINING_ENTRY_TYPE_OPTIONS = (
@@ -458,6 +465,22 @@ class DashboardAirtableService:
             return ValidationResult(fields={}, errors={})
         self.airtable.update_voice_record_fields(record_id, fields)
         return ValidationResult(fields=fields, errors={})
+
+    def move_kanban_record(self, record_id: str, status: str) -> dict[str, Any]:
+        """Move one Kanban card by changing only its processing status."""
+        ensure_record_id(record_id)
+        target_status = str(status or "").strip()
+        if target_status not in KANBAN_MOVE_STATUSES:
+            raise ValueError("Unsupported Kanban status")
+        metadata = self.metadata()
+        binding: FieldBinding = metadata["bindings"]["status"]
+        if binding.options and target_status not in binding.options:
+            raise ValueError("Kanban status is not available in Airtable")
+        try:
+            updated = self.airtable.update_voice_record_fields(record_id, {binding.write_name: target_status})
+        except KeyError as exc:
+            raise AirtableError("Voice Inbox record was not found") from exc
+        return normalize_record(updated, metadata["bindings"], self.settings)
 
     def list_rules(self) -> dict[str, Any]:
         metadata = self.metadata()

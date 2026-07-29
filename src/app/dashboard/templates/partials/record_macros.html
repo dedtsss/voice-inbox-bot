@@ -53,24 +53,33 @@
   </article>
 {%- endmacro %}
 
-{% macro kanban_card(record) -%}
-  <a class="kanban-card age-{{ record.age_state }}" href="/records/{{ record.id }}">
-    <div class="kanban-card-top">
-      <span class="record-type-icon small">{{ source_icon(record.source) }}</span>
-      {{ status_pill(record.status, record.status_display) }}
-    </div>
-    <strong>{{ record.title }}</strong>
-    <span class="kanban-summary">{{ record.summary or record.clean_text or record.raw_text or "Нет текста" }}</span>
-    <dl class="kanban-meta">
-      <div><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
-      <div><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
-      <div><dt>Тип</dt><dd>{{ record.entry_type or "—" }}</dd></div>
-      {% if record.ai_confidence_percent is not none %}
-        <div><dt>AI</dt><dd>{{ record.ai_confidence_percent }}%</dd></div>
-      {% endif %}
-    </dl>
-    <span class="kanban-time">{{ record.created_local }}</span>
-  </a>
+{% macro kanban_card(record, movable=true) -%}
+  <article class="kanban-card age-{{ record.age_state }}" data-kanban-card data-record-id="{{ record.id }}" data-current-status="{{ record.status }}">
+    <a class="kanban-card-link" href="/records/{{ record.id }}" aria-label="Открыть карточку: {{ record.title }}">
+      <div class="kanban-card-top">
+        <span class="record-type-icon small" data-card-source-icon>{{ source_icon(record.source) }}</span>
+        {{ status_pill(record.status, record.status_display) }}
+      </div>
+      <strong class="kanban-title">{{ record.title }}</strong>
+      <span class="kanban-summary">{{ record.summary or record.clean_text or record.raw_text or "Нет текста" }}</span>
+      <dl class="kanban-meta">
+        <div data-kanban-meta="source"><dt>Источник</dt><dd>{{ record.source or "—" }}</dd></div>
+        <div data-kanban-meta="project"><dt>Проект</dt><dd>{{ record.project or "—" }}</dd></div>
+        <div data-kanban-meta="type"><dt>Тип</dt><dd>{{ record.entry_type or "—" }}</dd></div>
+        {% if record.ai_confidence_percent is not none %}
+          <div data-kanban-meta="ai"><dt>AI</dt><dd>{{ record.ai_confidence_percent }}%</dd></div>
+        {% endif %}
+      </dl>
+      <div class="kanban-card-foot">
+        {% if record.priority %}<span class="tag priority">{{ record.priority }}</span>{% endif %}
+        <span class="kanban-age" title="Возраст карточки">{{ record.age_minutes }}м</span>
+        <span class="kanban-time">{{ record.created_local }}</span>
+      </div>
+    </a>
+    {% if movable %}
+      <button class="kanban-drag-handle" type="button" data-kanban-drag-handle aria-label="Переместить карточку: {{ record.title }}" title="Удерживайте и перетащите">⋮⋮</button>
+    {% endif %}
+  </article>
 {%- endmacro %}
 
 {% macro mini_record(record) -%}
