@@ -74,6 +74,22 @@ def create_dashboard_app(
         data = await to_thread(service.kanban, clean_query(request.query_params))
         return render(request, "kanban.html", {"data": data, "section": "kanban"})
 
+    @app.post("/kanban/records/{record_id}/move")
+    async def move_kanban_record(request: Request, record_id: str) -> dict[str, str]:
+        form = await request.form(max_fields=2, max_files=0)
+        csrf_token = str(form.get("csrf_token") or "")
+        if not validate_csrf_token(resolved_settings.dashboard_csrf_secret, csrf_token):
+            raise HTTPException(status_code=403, detail="Invalid CSRF token")
+        try:
+            record = await to_thread(service.move_kanban_record, record_id, str(form.get("status") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "record_id": record["id"],
+            "status": record["status"],
+            "status_display": record["status_display"],
+        }
+
     @app.get("/needs-review", response_class=HTMLResponse)
     async def needs_review(request: Request, saved: str = "", error: str = "") -> Response:
         data = await to_thread(service.review_records, clean_query(request.query_params))

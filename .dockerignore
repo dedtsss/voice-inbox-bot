@@ -6,6 +6,10 @@ __pycache__
 *.pyc
 *.log
 .DS_Store
+node_modules
+output
+test-results
+playwright-report
 data/*
 !data/incoming/
 data/incoming/*

@@ -1,0 +1,11 @@
+{
+  "name": "voice-inbox-dashboard-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:js": "node --test tests/browser/kanban-zoom.unit.test.cjs",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0"
+  }
+}

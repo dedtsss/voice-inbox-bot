@@ -7,31 +7,46 @@
     <div>
       <span class="eyebrow">{{ icons.icon("kanban") }}Kanban</span>
       <h1>Канбан входящих</h1>
-      <p class="muted">Карточки связаны с реальными Airtable-записями. Перемещение drag-and-drop не включено, чтобы не менять production-статусы случайным жестом.</p>
+      <p class="muted">Масштабируйте и перемещайте доску внутри её области. Статус карточки меняется только через отдельный drag-handle.</p>
     </div>
   </section>
 
   {% include "partials/filters.html" %}
 
-  <section class="kanban-board" aria-label="Канбан записей Voice Inbox">
-    {% for column in data.columns %}
-      <article class="kanban-column">
-        <header class="kanban-column-head">
-          <div>
-            <h2>{{ column.title }}</h2>
-            <p>{{ column.hint }}</p>
-          </div>
-          <span class="count-badge">{{ column.records|length }}</span>
-        </header>
-        <div class="kanban-stack">
-          {% for record in column.records %}
-            {{ records.kanban_card(record) }}
-          {% else %}
-            <div class="kanban-empty">Нет карточек</div>
+  <section class="kanban-shell" data-kanban-root data-min-scale="0.4" data-max-scale="1.2" data-scale-step="0.05" aria-label="Управление Kanban">
+    <div class="kanban-zoom-toolbar" role="toolbar" aria-label="Масштаб Kanban">
+      <button type="button" data-kanban-zoom-out aria-label="Уменьшить масштаб Kanban" title="Уменьшить">−</button>
+      <output data-kanban-scale-output aria-label="Текущий масштаб Kanban" aria-live="polite">100%</output>
+      <button type="button" data-kanban-zoom-in aria-label="Увеличить масштаб Kanban" title="Увеличить">+</button>
+      <button type="button" data-kanban-zoom-reset aria-label="Установить масштаб Kanban 100 процентов">100%</button>
+      <button type="button" class="fit-button" data-kanban-zoom-fit aria-label="Вместить Kanban в доступную область">Вместить</button>
+    </div>
+    <form data-kanban-csrf hidden>{{ csrf_input(request)|safe }}</form>
+    <p class="sr-only" data-kanban-live aria-live="polite"></p>
+    <div class="kanban-viewport" data-kanban-viewport tabindex="0" aria-label="Панорамируемая Kanban-доска" aria-keyshortcuts="Control++ Control+- Control+0">
+      <div class="kanban-stage" data-kanban-stage>
+        <section class="kanban-board" data-kanban-board aria-label="Канбан записей Voice Inbox">
+          {% for column in data.columns %}
+            <article class="kanban-column" data-kanban-column data-status="{{ column.status }}" data-column-key="{{ column.key }}">
+              <header class="kanban-column-head">
+                <div>
+                  <h2>{{ column.title }}</h2>
+                  <p>{{ column.hint }}</p>
+                </div>
+                <span class="count-badge" data-kanban-count>{{ column.records|length }}</span>
+              </header>
+              <div class="kanban-stack" data-kanban-stack>
+                {% for record in column.records %}
+                  {{ records.kanban_card(record, column.status != "") }}
+                {% else %}
+                  <div class="kanban-empty">Нет карточек</div>
+                {% endfor %}
+              </div>
+            </article>
           {% endfor %}
-        </div>
-      </article>
-    {% endfor %}
+        </section>
+      </div>
+    </div>
   </section>
 
   <nav class="pagination" aria-label="Пагинация">
