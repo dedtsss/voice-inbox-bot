@@ -270,6 +270,7 @@ textarea {
 
 .detail-hero {
   padding-bottom: 4px;
+  flex-wrap: wrap;
 }
 
 .eyebrow {
@@ -1859,5 +1860,137 @@ dd {
 
   .kanban-card:hover {
     transform: none;
+  }
+}
+
+/* Detail text is user-controlled: let grid and flex children shrink before it can widen a page. */
+.detail-layout,
+.detail-main,
+.detail-side,
+.detail-title,
+.detail-hero,
+.detail-hero > *,
+.panel,
+.panel-head,
+.panel-head > *,
+.compare-grid,
+.compare-grid > *,
+.field-list,
+.field-list > div,
+.field-list dt,
+.field-list dd,
+.edit-form,
+.edit-form > label,
+.edit-form .form-actions,
+.review-meta,
+.media-item,
+.media-item figcaption {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.detail-title h1,
+.field-list dd,
+.field-list dt,
+.media-item figcaption,
+.field-help {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.detail-hero > .detail-title {
+  flex: 1 1 auto;
+}
+
+.detail-hero > .hero-actions {
+  flex: 0 0 auto;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.field-list dd {
+  white-space: pre-wrap;
+}
+
+.text-block {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.technical-json,
+.technical-json .json-block {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.technical-json .json-block {
+  overflow: auto;
+  white-space: pre;
+}
+
+.edit-form input,
+.edit-form select,
+.edit-form textarea,
+.training-form input,
+.training-form select,
+.training-form textarea {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.field-help {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.check-list li.optional {
+  color: var(--muted);
+}
+
+.mini-record {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.mini-record > .mini-record-content {
+  min-width: 0;
+}
+
+.mini-record strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.mini-record small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 480px) {
+  .mini-record {
+    grid-template-columns: 38px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .mini-record > .status-pill {
+    grid-column: 2;
+    justify-self: start;
+    margin-top: 3px;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }

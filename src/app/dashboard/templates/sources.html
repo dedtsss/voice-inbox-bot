@@ -56,7 +56,7 @@
             <h2>{{ source.name }}</h2>
             <p class="muted">{{ source.count }} записей в текущей выборке.</p>
           </div>
-          <a class="icon-link" href="/records?source={{ source.name }}">{{ icons.icon("arrow") }}<span>Открыть</span></a>
+          <a class="icon-link" href="/records?source={{ source.value }}">{{ icons.icon("arrow") }}<span>Открыть</span></a>
         </div>
         <div class="mini-record-list">
           {% for record in source.records %}

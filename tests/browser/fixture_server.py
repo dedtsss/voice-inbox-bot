@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.dashboard.app import create_dashboard_app
-from tests.test_dashboard import FakeAirtable, make_record, make_settings, voice_table
+from tests.test_dashboard import FakeAirtable, iso, make_record, make_settings, voice_table
 
 
 def fixture_table() -> dict:
@@ -36,6 +36,21 @@ records = [
             "Статус обработки": "Processed",
             "Обучить на исправлении": True,
             "Обучение учтено": False,
+        },
+    ),
+    make_record(
+        "recFixtureLong1",
+        **{
+            "createdTime": iso(0),
+            "Название": "Очень длинный русский заголовок записи с URL https://example.test/" + "безпробелов" * 35,
+            "Источник": "",
+            "Тип": "note",
+            "Статус обработки": "Processed",
+            "Исходная фраза": "длинноесловобезпробелов" * 180,
+            "Очищенный текст": "https://example.test/" + "a" * 1600,
+            "Краткое содержание": "summary" + "x" * 1200,
+            "Следующее действие": "Проверить документацию " + "y" * 1000,
+            "External ID": "very-long-technical-identifier-" + "z" * 500,
         },
     ),
 ]

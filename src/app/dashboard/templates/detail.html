@@ -41,7 +41,7 @@
         </div>
         <dl class="field-list">
           <div><dt>Краткое содержание</dt><dd>{{ record.summary or "—" }}</dd></div>
-          <div><dt>Следующее действие</dt><dd>{{ record.next_action or "—" }}</dd></div>
+          <div><dt>Следующий конкретный шаг</dt><dd>{{ record.next_action or "Действие не определено" }}</dd></div>
           {% if record.processing_error_summary %}
             <div class="danger-row"><dt>Ошибка обработки</dt><dd>{{ record.processing_error_summary }}</dd></div>
           {% endif %}
@@ -135,7 +135,7 @@
           <li class="{% if record.raw_text %}done{% endif %}">{{ icons.icon("check") }}<span>Есть исходный текст</span></li>
           <li class="{% if record.clean_text %}done{% endif %}">{{ icons.icon("check") }}<span>Есть очищенный текст</span></li>
           <li class="{% if record.project %}done{% endif %}">{{ icons.icon("check") }}<span>Проект определен</span></li>
-          <li class="{% if record.next_action %}done{% endif %}">{{ icons.icon("check") }}<span>Следующее действие задано</span></li>
+          <li class="{% if record.next_action %}done{% else %}optional{% endif %}">{{ icons.icon("check") }}<span>Следующий конкретный шаг (если нужен)</span></li>
           <li class="{% if record.attachments %}done{% endif %}">{{ icons.icon("check") }}<span>Вложения доступны</span></li>
         </ul>
       </article>
@@ -155,15 +155,17 @@
               {% if field.input_type == "select" %}
                 <select name="{{ field.key }}">
                   <option value="">—</option>
+                  {% if field.legacy_option %}<option value="{{ field.legacy_option }}" selected>Устаревшее: {{ field.legacy_option }}</option>{% endif %}
                   {% for option in field.options %}
-                    <option value="{{ option }}" {% if field.value == option %}selected{% endif %}>{{ option }}</option>
+                    {% if option != field.legacy_option %}<option value="{{ option }}" {% if field.value == option %}selected{% endif %}>{{ option }}</option>{% endif %}
                   {% endfor %}
                 </select>
               {% elif field.input_type == "textarea" %}
-                <textarea name="{{ field.key }}" maxlength="{{ field.max_length }}" rows="4">{{ field.value }}</textarea>
+                <textarea name="{{ field.key }}" maxlength="{{ field.max_length }}" rows="4"{% if field.placeholder %} placeholder="{{ field.placeholder }}"{% endif %}>{{ field.value }}</textarea>
               {% else %}
                 <input name="{{ field.key }}" type="{{ field.input_type }}" value="{{ field.value }}" {% if field.max_length %}maxlength="{{ field.max_length }}"{% endif %}>
               {% endif %}
+              {% if field.helper_text %}<small class="field-help">{{ field.helper_text }}</small>{% endif %}
               {% if errors and errors.get(field.key) %}
                 <b class="field-error">{{ errors.get(field.key) }}</b>
               {% endif %}

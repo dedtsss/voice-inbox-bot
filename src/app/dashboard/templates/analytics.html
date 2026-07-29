@@ -30,8 +30,8 @@
     <article class="panel span-6">
       <div class="panel-head"><h2>Источники</h2></div>
       <div class="distribution-list large">
-        {% for source, count in overview.source_counts %}
-          <a href="/records?source={{ source }}" class="distribution-row"><span>{{ source }}</span><strong>{{ count }}</strong></a>
+        {% for source in overview.source_counts %}
+          <a href="/records?source={{ source.value }}" class="distribution-row"><span>{{ source.label }}</span><strong>{{ source.count }}</strong></a>
         {% endfor %}
       </div>
     </article>

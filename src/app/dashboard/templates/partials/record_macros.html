@@ -85,7 +85,7 @@
 {% macro mini_record(record) -%}
   <a class="mini-record" href="/records/{{ record.id }}">
     <span class="record-type-icon small">{{ source_icon(record.source) }}</span>
-    <span>
+    <span class="mini-record-content">
       <strong>{{ record.title }}</strong>
       <small>{{ record.source or "—" }} · {{ record.created_local }}</small>
     </span>

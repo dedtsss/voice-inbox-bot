@@ -43,8 +43,8 @@ class OpenAIProcessor:
                         "If the source note is Russian, keep clean_text in Russian and do not translate "
                         "Russian voice notes to English. Use short practical Russian wording. "
                         "Never use English default phrases such as 'Review note content'. "
-                        "If the next action is unclear, use 'Разобрать позже'. "
-                        "If no action is actually needed, use 'Не требуется'. "
+                        "next_action must be one concrete next step only when the record implies an action; "
+                        "otherwise return an empty string. Do not invent a follow-up for a note or reference. "
                         "project_confidence is 0..1. tags is an array of short strings. "
                         "If unsure about project, use empty project and confidence 0."
                     ),
@@ -67,7 +67,7 @@ def _normalize_structure(data: dict, raw_text: str, message_type: str) -> dict:
         "type": _clean_str(data.get("type")) or message_type,
         "project": _clean_str(data.get("project")),
         "priority": _clean_str(data.get("priority")) or "Normal",
-        "next_action": _normalize_next_action(data.get("next_action"), raw_text),
+        "next_action": _normalize_next_action(data.get("next_action")),
         "summary": _clean_str(data.get("summary")) or fallback["summary"],
         "clean_text": _clean_str(data.get("clean_text")) or raw_text.strip(),
         "tags": _clean_tags(data.get("tags")),
@@ -88,7 +88,7 @@ def _fallback_structure(raw_text: str, message_type: str) -> dict:
         "project": "",
         "project_confidence": 0.0,
         "priority": "Normal",
-        "next_action": _default_next_action(raw_text),
+        "next_action": "",
         "summary": text[:500],
         "clean_text": raw_text.strip(),
         "tags": [],
@@ -101,10 +101,10 @@ def _clean_str(value: object) -> str:
     return " ".join(str(value).strip().split())
 
 
-def _normalize_next_action(value: object, raw_text: str) -> str:
+def _normalize_next_action(value: object) -> str:
     action = _clean_str(value)
     if not action:
-        return _default_next_action(raw_text)
+        return ""
 
     lowered = action.casefold()
     no_action_phrases = {
@@ -125,25 +125,10 @@ def _normalize_next_action(value: object, raw_text: str) -> str:
         "follow up later",
     }
     if lowered in no_action_phrases:
-        return "Не требуется"
+        return ""
     if lowered in generic_english_phrases:
-        return "Разобрать позже"
+        return ""
     return action
-
-
-def _default_next_action(raw_text: str) -> str:
-    lowered = raw_text.casefold()
-    no_action_markers = (
-        "ничего делать не нужно",
-        "действий не требуется",
-        "не требует действий",
-        "просто к сведению",
-        "для информации",
-        "без действия",
-    )
-    if any(marker in lowered for marker in no_action_markers):
-        return "Не требуется"
-    return "Разобрать позже"
 
 
 def _clean_tags(value: object) -> list[str]:

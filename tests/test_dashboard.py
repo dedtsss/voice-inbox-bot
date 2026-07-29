@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app.airtable import AirtableError, ProjectMatch
 from app.config import Settings
 from app.dashboard.airtable_service import DashboardAirtableService
+from app.dashboard.data_cleanup_audit import aggregate_audit
 from app.dashboard.app import create_dashboard_app, safe_return_path
 
 
@@ -671,6 +672,133 @@ def test_filters_and_search_build_airtable_formula() -> None:
     params = dict(airtable.page_calls[-1]["params"])
     assert params["sort[0][field]"] == "Dashboard Created Time"
     assert params["sort[0][direction]"] == "desc"
+
+
+def test_empty_source_filter_uses_blank_formula_and_preserves_pagination() -> None:
+    records = [
+        make_record(f"recMissing{i:02d}", **{"Название": f"Missing source {i}", "Источник": ""})
+        for i in range(3)
+    ] + [make_record("recAndroid01", **{"Название": "Android", "Источник": "Android"})]
+    client, airtable = make_client(FakeAirtable(records=records), DASHBOARD_PAGE_SIZE=2)
+
+    overview = client.get("/")
+    assert overview.status_code == 200
+    assert "Источник не указан" in overview.text
+    assert "/records?source=__empty__" in overview.text
+
+    response = client.get("/records?source=__empty__&page_size=2")
+
+    assert response.status_code == 200
+    assert "Источник не указан" in response.text
+    assert "source=__empty__" in response.text
+    formula = dict(airtable.page_calls[-1]["params"])["filterByFormula"]
+    assert "OR({Источник} = '',NOT({Источник}))" in formula
+    assert "Без источника" not in formula
+    assert response.text.count('<article class="record-card') == 2
+
+
+def test_source_filter_never_accepts_query_formula() -> None:
+    client, airtable = make_client()
+
+    response = client.get("/records?source=%27%2COR%281%2C1%29%2C%27")
+
+    assert response.status_code == 200
+    formula = dict(airtable.page_calls[-1]["params"])["filterByFormula"]
+    assert "{Источник} = '\\',OR(1,1),\\''" in formula
+    assert "filterByFormula=" not in formula
+
+
+def test_type_options_are_casefold_deduplicated_and_keep_legacy_current_value() -> None:
+    table = voice_table()
+    type_field = next(field for field in table["fields"] if field["name"] == "Тип")
+    type_field["options"]["choices"] = [
+        {"name": value}
+        for value in ("file", "File", " note ", "Note", "Voice", "Задача")
+    ]
+    record = make_record("recLegacyType1", **{"Тип": "note"})
+    service = DashboardAirtableService(make_settings(), FakeAirtable(records=[record], table=table))  # type: ignore[arg-type]
+
+    item = service.fetch_record("recLegacyType1")
+    entry_type = next(field for field in item["editable_fields"] if field.key == "entry_type")
+
+    assert entry_type.legacy_option == "note"
+    assert entry_type.options == ("Note", "Задача")
+    assert service.list_records({})["options"]["types"] == ["File", "Note", "Voice", "Задача"]
+
+
+def test_type_form_preserves_legacy_value_or_writes_canonical_replacement() -> None:
+    table = voice_table()
+    type_field = next(field for field in table["fields"] if field["name"] == "Тип")
+    type_field["options"]["choices"] = [{"name": "note"}, {"name": "Note"}, {"name": "Задача"}]
+    fake = FakeAirtable(records=[make_record("recLegacyType2", **{"Тип": "note"})], table=table)
+    service = DashboardAirtableService(make_settings(), fake)  # type: ignore[arg-type]
+
+    unchanged = service.update_record_from_form("recLegacyType2", {"entry_type": "note"}, train=False)
+    replaced = service.update_record_from_form("recLegacyType2", {"entry_type": "Note"}, train=False)
+
+    assert unchanged.errors == {}
+    assert fake.updates[-1][1]["Тип"] == "Note"
+    assert replaced.errors == {}
+
+
+def test_next_action_is_optional_in_detail_and_training() -> None:
+    record = make_record("recNoAction1", **{"Следующее действие": "", "Статус обработки": "Processed"})
+    client, airtable = make_client(FakeAirtable(records=[record], table=training_table()))
+
+    detail = client.get("/records/recNoAction1")
+    assert "Следующий конкретный шаг" in detail.text
+    assert "Необязательно. Заполняйте, только если из записи следует действие" in detail.text
+    assert 'placeholder="Например: Проверить документацию"' in detail.text
+    assert "Действие не определено" in detail.text
+
+    token = csrf_from(client.get("/learning/session/recNoAction1").text)
+    response = client.post(
+        "/learning/session/recNoAction1/complete",
+        data={
+            "csrf_token": token,
+            "scope": "Рабочее",
+            "project": "Work",
+            "entry_type": "Задача",
+            "next_action": "",
+            "priority": "Normal",
+        },
+        headers={"Origin": "http://testserver"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "Следующее действие" not in airtable.updates[-1][1]
+
+
+def test_data_cleanup_audit_is_aggregate_only_and_marks_only_stable_source_prefixes() -> None:
+    records = [
+        make_record("recAudit1", **{"Источник": "", "External ID": "telegram:123:5", "Тип": "note"}),
+        make_record("recAudit2", **{"Источник": "", "External ID": "", "Тип": "Note"}),
+    ]
+    report = aggregate_audit(
+        records,
+        fields={
+            "title": "Название",
+            "entry_type": "Тип",
+            "source": "Источник",
+            "status": "Статус обработки",
+            "processing_route": "Processing Route",
+            "external_id": "External ID",
+            "google_drive": "Google Drive",
+            "raw_text": "Исходная фраза",
+            "clean_text": "Очищенный текст",
+            "notes": "Notes",
+            "training_answers_json": "Training Answers JSON",
+        },
+        active_type_choices=["note", "Note"],
+    )
+
+    assert report["type_audit"]["case_or_space_alias_groups"] == [
+        {"normalized": "note", "variants": [{"value": "Note", "count": 1}, {"value": "note", "count": 1}]}
+    ]
+    assert report["missing_source_audit"]["deterministic_source_candidates"] == {"Telegram": 1}
+    assert report["missing_source_audit"]["remaining_undetermined"] == 1
+    assert "recAudit1" not in json.dumps(report, ensure_ascii=False)
 
 
 @pytest.mark.parametrize(
