@@ -1,0 +1,29 @@
+# Production CI replacement for .github/workflows/tests.yml.
+# Each step runs in a disposable container. No production secrets are injected.
+# Existing GitHub Actions may be disabled only after all three checks pass.
+when:
+  - event: [push, pull_request, manual]
+steps:
+  - name: python-pytest
+    image: python:3.11-slim-bookworm
+    commands:
+      - python --version
+      - python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - python -m pytest
+
+  - name: javascript-unit
+    image: node:22-bookworm-slim
+    commands:
+      - node --version
+      - npm ci --no-audit --no-fund
+      - npm run test:js
+
+  - name: chromium-browser
+    image: mcr.microsoft.com/playwright:v1.62.0-noble
+    commands:
+      - apt-get update -qq
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv
+      - python3 -m venv .venv
+      - .venv/bin/python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - npm ci --no-audit --no-fund
+      - env PATH="$PWD/.venv/bin:$PATH" npm run test:browser
