@@ -1,0 +1,11 @@
+# Woodpecker CI 3.20.x: first automated test after GitHub OAuth/webhook activation.
+# No deployment and no production secrets. External PRs require approval by default.
+when:
+  - event: [push, pull_request]
+steps:
+  - name: node-tests
+    image: node:22-alpine
+    commands:
+      - node --version
+      - npm ci --no-audit --no-fund
+      - npm run test:js
